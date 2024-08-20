@@ -64,13 +64,15 @@ type Config = ethconfig.Config
 
 // Ethereum implements the Ethereum full node service.
 type Ethereum struct {
-	// core protocol objects
-	config     *ethconfig.Config
-	txPool     *txpool.TxPool
-	blockchain *core.BlockChain
+	config *ethconfig.Config
 
-	handler *handler
-	discmix *enode.FairMix
+	// Handlers
+	txPool *txpool.TxPool
+
+	blockchain         *core.BlockChain
+	handler            *handler
+	ethDialCandidates  enode.Iterator
+	snapDialCandidates enode.Iterator
 
 	// DB interfaces
 	chainDb ethdb.Database // Block chain database
@@ -160,7 +162,6 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		bloomRequests:     make(chan chan *bloombits.Retrieval),
 		bloomIndexer:      core.NewBloomIndexer(chainDb, params.BloomBitsBlocks, params.BloomConfirms),
 		p2pServer:         stack.Server(),
-		discmix:           enode.NewFairMix(0),
 		shutdownTracker:   shutdowncheck.NewShutdownTracker(chainDb),
 	}
 	bcVersion := rawdb.ReadDatabaseVersion(chainDb)
@@ -265,6 +266,17 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	}
 	eth.APIBackend.gpo = gasprice.NewOracle(eth.APIBackend, config.GPO, config.Miner.GasPrice)
 
+	// Setup DNS discovery iterators.
+	dnsclient := dnsdisc.NewClient(dnsdisc.Config{})
+	eth.ethDialCandidates, err = dnsclient.NewIterator(eth.config.EthDiscoveryURLs...)
+	if err != nil {
+		return nil, err
+	}
+	eth.snapDialCandidates, err = dnsclient.NewIterator(eth.config.SnapDiscoveryURLs...)
+	if err != nil {
+		return nil, err
+	}
+
 	// Start the RPC service
 	eth.netRPCService = ethapi.NewNetAPI(eth.p2pServer, networkID)
 
@@ -347,9 +359,9 @@ func (s *Ethereum) BloomIndexer() *core.ChainIndexer   { return s.bloomIndexer }
 // Protocols returns all the currently configured
 // network protocols to start.
 func (s *Ethereum) Protocols() []p2p.Protocol {
-	protos := eth.MakeProtocols((*ethHandler)(s.handler), s.networkID, s.discmix)
+	protos := eth.MakeProtocols((*ethHandler)(s.handler), s.networkID, s.ethDialCandidates)
 	if s.config.SnapshotCache > 0 {
-		protos = append(protos, snap.MakeProtocols((*snapHandler)(s.handler))...)
+		protos = append(protos, snap.MakeProtocols((*snapHandler)(s.handler), s.snapDialCandidates)...)
 	}
 	return protos
 }
@@ -357,7 +369,7 @@ func (s *Ethereum) Protocols() []p2p.Protocol {
 // Start implements node.Lifecycle, starting all internal goroutines needed by the
 // Ethereum protocol implementation.
 func (s *Ethereum) Start() error {
-	s.setupDiscovery()
+	eth.StartENRUpdater(s.blockchain, s.p2pServer.LocalNode())
 
 	// Start the bloom bits servicing goroutines
 	s.startBloomHandlers(params.BloomBitsBlocks)
@@ -365,40 +377,16 @@ func (s *Ethereum) Start() error {
 	// Regularly update shutdown marker
 	s.shutdownTracker.Start()
 
-	// Start the networking layer
-	s.handler.Start(s.p2pServer.MaxPeers)
-	return nil
-}
-
-func (s *Ethereum) setupDiscovery() error {
-	eth.StartENRUpdater(s.blockchain, s.p2pServer.LocalNode())
-
-	// Add eth nodes from DNS.
-	dnsclient := dnsdisc.NewClient(dnsdisc.Config{})
-	if len(s.config.EthDiscoveryURLs) > 0 {
-		iter, err := dnsclient.NewIterator(s.config.EthDiscoveryURLs...)
-		if err != nil {
-			return err
+	// Figure out a max peers count based on the server limits
+	maxPeers := s.p2pServer.MaxPeers
+	if s.config.LightServ > 0 {
+		if s.config.LightPeers >= s.p2pServer.MaxPeers {
+			return fmt.Errorf("invalid peer config: light peer count (%d) >= total peer count (%d)", s.config.LightPeers, s.p2pServer.MaxPeers)
 		}
-		s.discmix.AddSource(iter)
+		maxPeers -= s.config.LightPeers
 	}
-
-	// Add snap nodes from DNS.
-	if len(s.config.SnapDiscoveryURLs) > 0 {
-		iter, err := dnsclient.NewIterator(s.config.SnapDiscoveryURLs...)
-		if err != nil {
-			return err
-		}
-		s.discmix.AddSource(iter)
-	}
-
-	// Add DHT nodes from discv5.
-	if s.p2pServer.DiscoveryV5() != nil {
-		filter := eth.NewNodeFilter(s.blockchain)
-		iter := enode.Filter(s.p2pServer.DiscoveryV5().RandomNodes(), filter)
-		s.discmix.AddSource(iter)
-	}
-
+	// Start the networking layer and the light server if requested
+	s.handler.Start(maxPeers)
 	return nil
 }
 
@@ -406,7 +394,8 @@ func (s *Ethereum) setupDiscovery() error {
 // Ethereum protocol.
 func (s *Ethereum) Stop() error {
 	// Stop all the peer-related stuff first.
-	s.discmix.Close()
+	s.ethDialCandidates.Close()
+	s.snapDialCandidates.Close()
 	s.handler.Stop()
 
 	// Then stop everything else.

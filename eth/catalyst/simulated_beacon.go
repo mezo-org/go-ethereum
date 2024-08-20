@@ -20,7 +20,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"errors"
-	"fmt"
 	"math/big"
 	"sync"
 	"time"
@@ -31,7 +30,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/eth"
-	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/params"
@@ -43,46 +41,36 @@ const devEpochLength = 32
 // withdrawalQueue implements a FIFO queue which holds withdrawals that are
 // pending inclusion.
 type withdrawalQueue struct {
-	pending types.Withdrawals
-	mu      sync.Mutex
-	feed    event.Feed
-	subs    event.SubscriptionScope
+	pending chan *types.Withdrawal
 }
-
-type newWithdrawalsEvent struct{ Withdrawals types.Withdrawals }
 
 // add queues a withdrawal for future inclusion.
 func (w *withdrawalQueue) add(withdrawal *types.Withdrawal) error {
-	w.mu.Lock()
-	w.pending = append(w.pending, withdrawal)
-	w.mu.Unlock()
-
-	w.feed.Send(newWithdrawalsEvent{types.Withdrawals{withdrawal}})
+	select {
+	case w.pending <- withdrawal:
+		break
+	default:
+		return errors.New("withdrawal queue full")
+	}
 	return nil
 }
 
-// pop dequeues the specified number of withdrawals from the queue.
-func (w *withdrawalQueue) pop(count int) types.Withdrawals {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	count = min(count, len(w.pending))
-	popped := w.pending[0:count]
-	w.pending = w.pending[count:]
-
-	return popped
+// gatherPending returns a number of queued withdrawals up to a maximum count.
+func (w *withdrawalQueue) gatherPending(maxCount int) []*types.Withdrawal {
+	withdrawals := []*types.Withdrawal{}
+	for {
+		select {
+		case withdrawal := <-w.pending:
+			withdrawals = append(withdrawals, withdrawal)
+			if len(withdrawals) == maxCount {
+				return withdrawals
+			}
+		default:
+			return withdrawals
+		}
+	}
 }
 
-// subscribe allows a listener to be updated when new withdrawals are added to
-// the queue.
-func (w *withdrawalQueue) subscribe(ch chan<- newWithdrawalsEvent) event.Subscription {
-	sub := w.feed.Subscribe(ch)
-	return w.subs.Track(sub)
-}
-
-// SimulatedBeacon drives an Ethereum instance as if it were a real beacon
-// client. It can run in period mode where it mines a new block every period
-// (seconds) or on every transaction via Commit, Fork and AdjustTime.
 type SimulatedBeacon struct {
 	shutdownCh  chan struct{}
 	eth         *eth.Ethereum
@@ -98,6 +86,10 @@ type SimulatedBeacon struct {
 }
 
 // NewSimulatedBeacon constructs a new simulated beacon chain.
+// Period sets the period in which blocks should be produced.
+//
+//   - If period is set to 0, a block is produced on every transaction.
+//     via Commit, Fork and AdjustTime.
 func NewSimulatedBeacon(period uint64, eth *eth.Ethereum) (*SimulatedBeacon, error) {
 	block := eth.BlockChain().CurrentBlock()
 	current := engine.ForkchoiceStateV1{
@@ -120,6 +112,7 @@ func NewSimulatedBeacon(period uint64, eth *eth.Ethereum) (*SimulatedBeacon, err
 		engineAPI:          engineAPI,
 		lastBlockTime:      block.Time,
 		curForkchoiceState: current,
+		withdrawals:        withdrawalQueue{make(chan *types.Withdrawal, 20)},
 	}, nil
 }
 
@@ -163,16 +156,6 @@ func (c *SimulatedBeacon) sealBlock(withdrawals []*types.Withdrawal, timestamp u
 		c.setCurrentState(header.Hash(), *finalizedHash)
 	}
 
-	// Because transaction insertion, block insertion, and block production will
-	// happen without any timing delay between them in simulator mode and the
-	// transaction pool will be running its internal reset operation on a
-	// background thread, flaky executions can happen. To avoid the racey
-	// behavior, the pool will be explicitly blocked on its reset before
-	// continuing to the block production below.
-	if err := c.eth.APIBackend.TxPool().Sync(); err != nil {
-		return fmt.Errorf("failed to sync txpool: %w", err)
-	}
-
 	var random [32]byte
 	rand.Read(random[:])
 	fcResponse, err := c.engineAPI.forkchoiceUpdated(c.curForkchoiceState, &engine.PayloadAttributes{
@@ -181,14 +164,13 @@ func (c *SimulatedBeacon) sealBlock(withdrawals []*types.Withdrawal, timestamp u
 		Withdrawals:           withdrawals,
 		Random:                random,
 		BeaconRoot:            &common.Hash{},
-	}, engine.PayloadV3)
+	}, engine.PayloadV3, true)
 	if err != nil {
 		return err
 	}
 	if fcResponse == engine.STATUS_SYNCING {
 		return errors.New("chain rewind prevented invocation of payload creation")
 	}
-
 	envelope, err := c.engineAPI.getPayload(*fcResponse.PayloadID, true)
 	if err != nil {
 		return err
@@ -241,7 +223,8 @@ func (c *SimulatedBeacon) loop() {
 		case <-c.shutdownCh:
 			return
 		case <-timer.C:
-			if err := c.sealBlock(c.withdrawals.pop(10), uint64(time.Now().Unix())); err != nil {
+			withdrawals := c.withdrawals.gatherPending(10)
+			if err := c.sealBlock(withdrawals, uint64(time.Now().Unix())); err != nil {
 				log.Warn("Error performing sealing work", "err", err)
 			} else {
 				timer.Reset(time.Second * time.Duration(c.period))
@@ -277,7 +260,7 @@ func (c *SimulatedBeacon) setCurrentState(headHash, finalizedHash common.Hash) {
 
 // Commit seals a block on demand.
 func (c *SimulatedBeacon) Commit() common.Hash {
-	withdrawals := c.withdrawals.pop(10)
+	withdrawals := c.withdrawals.gatherPending(10)
 	if err := c.sealBlock(withdrawals, uint64(time.Now().Unix())); err != nil {
 		log.Warn("Error performing sealing work", "err", err)
 	}
@@ -318,14 +301,16 @@ func (c *SimulatedBeacon) AdjustTime(adjustment time.Duration) error {
 	if parent == nil {
 		return errors.New("parent not found")
 	}
-	withdrawals := c.withdrawals.pop(10)
+	withdrawals := c.withdrawals.gatherPending(10)
 	return c.sealBlock(withdrawals, parent.Time+uint64(adjustment/time.Second))
 }
 
-// RegisterSimulatedBeaconAPIs registers the simulated beacon's API with the
-// stack.
 func RegisterSimulatedBeaconAPIs(stack *node.Node, sim *SimulatedBeacon) {
-	api := newSimulatedBeaconAPI(sim)
+	api := &api{sim}
+	if sim.period == 0 {
+		// mine on demand if period is set to 0
+		go api.loop()
+	}
 	stack.RegisterAPIs([]rpc.API{
 		{
 			Namespace: "dev",

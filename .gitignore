@@ -28,9 +28,6 @@ build/_vendor/pkg
 /build/bin/
 /geth*.zip
 
-# used by the build/ci.go archive + upload tool
-/geth*.tar.gz
-
 # travis
 profile.tmp
 profile.cov

@@ -126,6 +126,8 @@ var (
 		"focal",  // 20.04, EOL: 04/2030
 		"jammy",  // 22.04, EOL: 04/2032
 		"noble",  // 24.04, EOL: 04/2034
+
+		"mantic", // 23.10, EOL: 07/2024
 	}
 
 	// This is where the tests should be unpacked.
@@ -347,10 +349,10 @@ func downloadSpecTestFixtures(csdb *build.ChecksumDB, cachedir string) string {
 	return filepath.Join(cachedir, base)
 }
 
-// hashAllSourceFiles iterates all files under the top-level project directory
+// hashSourceFiles iterates all files under the top-level project directory
 // computing the hash of each file (excluding files within the tests
 // subrepo)
-func hashAllSourceFiles() (map[string]common.Hash, error) {
+func hashSourceFiles() (map[string]common.Hash, error) {
 	res := make(map[string]common.Hash)
 	err := filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
 		if strings.HasPrefix(path, filepath.FromSlash("tests/testdata")) {
@@ -377,56 +379,6 @@ func hashAllSourceFiles() (map[string]common.Hash, error) {
 	return res, nil
 }
 
-// hashSourceFiles iterates the provided set of filepaths (relative to the top-level geth project directory)
-// computing the hash of each file.
-func hashSourceFiles(files []string) (map[string]common.Hash, error) {
-	res := make(map[string]common.Hash)
-	for _, filePath := range files {
-		f, err := os.OpenFile(filePath, os.O_RDONLY, 0666)
-		if err != nil {
-			return nil, err
-		}
-		hasher := sha256.New()
-		if _, err := io.Copy(hasher, f); err != nil {
-			return nil, err
-		}
-		res[filePath] = common.Hash(hasher.Sum(nil))
-	}
-	return res, nil
-}
-
-// compareHashedFilesets compares two maps (key is relative file path to top-level geth directory, value is its hash)
-// and returns the list of file paths whose hashes differed.
-func compareHashedFilesets(preHashes map[string]common.Hash, postHashes map[string]common.Hash) []string {
-	updates := []string{}
-	for path, postHash := range postHashes {
-		preHash, ok := preHashes[path]
-		if !ok || preHash != postHash {
-			updates = append(updates, path)
-		}
-	}
-	return updates
-}
-
-func doGoModTidy() {
-	targetFiles := []string{"go.mod", "go.sum"}
-	preHashes, err := hashSourceFiles(targetFiles)
-	if err != nil {
-		log.Fatal("failed to hash go.mod/go.sum", "err", err)
-	}
-	tc := new(build.GoToolchain)
-	c := tc.Go("mod", "tidy")
-	build.MustRun(c)
-	postHashes, err := hashSourceFiles(targetFiles)
-	updates := compareHashedFilesets(preHashes, postHashes)
-	for _, updatedFile := range updates {
-		fmt.Fprintf(os.Stderr, "changed file %s\n", updatedFile)
-	}
-	if len(updates) != 0 {
-		log.Fatal("go.sum and/or go.mod were updated by running 'go mod tidy'")
-	}
-}
-
 // doGenerate ensures that re-generating generated files does not cause
 // any mutations in the source file tree:  i.e. all generated files were
 // updated and committed.  Any stale generated files are updated.
@@ -443,7 +395,7 @@ func doGenerate() {
 	var preHashes map[string]common.Hash
 	if *verify {
 		var err error
-		preHashes, err = hashAllSourceFiles()
+		preHashes, err = hashSourceFiles()
 		if err != nil {
 			log.Fatal("failed to compute map of source hashes", "err", err)
 		}
@@ -458,11 +410,17 @@ func doGenerate() {
 		return
 	}
 	// Check if files were changed.
-	postHashes, err := hashAllSourceFiles()
+	postHashes, err := hashSourceFiles()
 	if err != nil {
 		log.Fatal("error computing source tree file hashes", "err", err)
 	}
-	updates := compareHashedFilesets(preHashes, postHashes)
+	updates := []string{}
+	for path, postHash := range postHashes {
+		preHash, ok := preHashes[path]
+		if !ok || preHash != postHash {
+			updates = append(updates, path)
+		}
+	}
 	for _, updatedFile := range updates {
 		fmt.Fprintf(os.Stderr, "changed file %s\n", updatedFile)
 	}
@@ -485,8 +443,6 @@ func doLint(cmdline []string) {
 	linter := downloadLinter(*cachedir)
 	lflags := []string{"run", "--config", ".golangci.yml"}
 	build.MustRunCommandWithOutput(linter, append(lflags, packages...)...)
-
-	doGoModTidy()
 	fmt.Println("You have achieved perfection.")
 }
 
