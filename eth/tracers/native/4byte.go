@@ -92,7 +92,7 @@ func (t *fourByteTracer) store(id []byte, size int) {
 func (t *fourByteTracer) OnTxStart(env *tracing.VMContext, tx *types.Transaction, from common.Address) {
 	// Update list of precompiles based on current block
 	rules := t.chainConfig.Rules(env.BlockNumber, env.Random != nil, env.Time)
-	t.activePrecompiles = vm.ActivePrecompiles(rules)
+	t.activePrecompiles = vm.DefaultActivePrecompiles(rules)
 }
 
 // OnEnter is called when EVM enters a new scope (via call, create or selfdestruct).

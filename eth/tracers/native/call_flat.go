@@ -208,7 +208,7 @@ func (t *flatCallTracer) OnTxStart(env *tracing.VMContext, tx *types.Transaction
 	t.tracer.OnTxStart(env, tx, from)
 	// Update list of precompiles based on current block
 	rules := t.chainConfig.Rules(env.BlockNumber, env.Random != nil, env.Time)
-	t.activePrecompiles = vm.ActivePrecompiles(rules)
+	t.activePrecompiles = vm.DefaultActivePrecompiles(rules)
 }
 
 func (t *flatCallTracer) OnTxEnd(receipt *types.Receipt, err error) {

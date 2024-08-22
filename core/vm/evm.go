@@ -122,6 +122,9 @@ type EVM struct {
 	// precompiles holds the precompiled contracts for the current epoch
 	precompiles map[common.Address]PrecompiledContract
 
+	// activePrecompiles defines the precompiles that are currently active
+	activePrecompiles []common.Address
+
 	// jumpDests stores results of JUMPDEST analysis.
 	jumpDests JumpDestCache
 
@@ -146,7 +149,9 @@ func NewEVM(blockCtx BlockContext, statedb StateDB, chainConfig *params.ChainCon
 		jumpDests:   newMapJumpDests(),
 		hasher:      crypto.NewKeccakState(),
 	}
+
 	evm.precompiles = activePrecompiledContracts(evm.chainRules)
+	evm.activePrecompiles = DefaultActivePrecompiles(evm.chainRules)
 
 	switch {
 	case evm.chainRules.IsOsaka:
@@ -181,6 +186,7 @@ func NewEVM(blockCtx BlockContext, statedb StateDB, chainConfig *params.ChainCon
 	default:
 		evm.table = &frontierInstructionSet
 	}
+
 	var extraEips []int
 	if len(evm.Config.ExtraEips) > 0 {
 		// Deep-copy jumptable to prevent modification of opcodes in other tables
@@ -255,7 +261,7 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 		return nil, gas, ErrInsufficientBalance
 	}
 	snapshot := evm.StateDB.Snapshot()
-	p, isPrecompile := evm.precompile(addr)
+	p, isPrecompile := evm.Precompile(addr)
 
 	if !evm.StateDB.Exist(addr) {
 		if !isPrecompile && evm.chainRules.IsEIP4762 && !isSystemCall(caller) {
@@ -282,8 +288,9 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 	}
 	evm.Context.Transfer(evm.StateDB, caller, addr, value)
 
+	// It is allowed to call precompiles, even via call -- as opposed to callcode, staticcall and delegatecall it can also modify state
 	if isPrecompile {
-		ret, gas, err = RunPrecompiledContract(p, input, gas, evm.Config.Tracer)
+			ret, gas, err = evm.RunPrecompiledContract(p, AccountRef(caller), input, gas, value, false)
 	} else {
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		code := evm.resolveCode(addr)
@@ -345,9 +352,9 @@ func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byt
 	}
 	var snapshot = evm.StateDB.Snapshot()
 
-	// It is allowed to call precompiles, even via delegatecall
-	if p, isPrecompile := evm.precompile(addr); isPrecompile {
-		ret, gas, err = RunPrecompiledContract(p, input, gas, evm.Config.Tracer)
+	// It is allowed to call precompiles, even via callcode, but only for reading
+	if p, isPrecompile := evm.Precompile(addr); isPrecompile {
+		ret, gas, err = evm.RunPrecompiledContract(p, AccountRef(caller), input, gas, value, true)
 	} else {
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		// The contract is a scoped environment for this execution context only.
@@ -389,8 +396,8 @@ func (evm *EVM) DelegateCall(originCaller common.Address, caller common.Address,
 	var snapshot = evm.StateDB.Snapshot()
 
 	// It is allowed to call precompiles, even via delegatecall
-	if p, isPrecompile := evm.precompile(addr); isPrecompile {
-		ret, gas, err = RunPrecompiledContract(p, input, gas, evm.Config.Tracer)
+	if p, isPrecompile := evm.Precompile(addr); isPrecompile {
+		ret, gas, err = evm.RunPrecompiledContract(p, AccountRef(caller), input, gas, nil, true)
 	} else {
 		// Initialise a new contract and make initialise the delegate values
 		//
@@ -441,8 +448,8 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 	// future scenarios
 	evm.StateDB.AddBalance(addr, new(uint256.Int), tracing.BalanceChangeTouchAccount)
 
-	if p, isPrecompile := evm.precompile(addr); isPrecompile {
-		ret, gas, err = RunPrecompiledContract(p, input, gas, evm.Config.Tracer)
+	if p, isPrecompile := evm.Precompile(addr); isPrecompile {
+		ret, gas, err = evm.RunPrecompiledContract(p, AccountRef(caller), input, gas, new(uint256.Int), true)
 	} else {
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		// The contract is a scoped environment for this execution context only.

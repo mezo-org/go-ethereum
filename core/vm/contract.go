@@ -22,6 +22,17 @@ import (
 	"github.com/holiman/uint256"
 )
 
+// ContractRef is a reference to a contract-like object by address.
+type ContractRef interface {
+	Address() common.Address
+}
+
+// AccountRef implements ContractRef.
+type AccountRef common.Address
+
+// Address casts AccountRef to common.Address.
+func (ar AccountRef) Address() common.Address { return common.Address(ar) }
+
 // Contract represents an ethereum contract in the state database. It contains
 // the contract code, calling arguments. Contract implements ContractRef
 type Contract struct {
@@ -42,8 +53,9 @@ type Contract struct {
 	IsDeployment bool
 	IsSystemCall bool
 
-	Gas   uint64
-	value *uint256.Int
+	Gas          uint64
+	value        *uint256.Int
+	isPrecompile bool
 }
 
 // NewContract returns a new contract environment for the execution of EVM.
@@ -61,7 +73,33 @@ func NewContract(caller common.Address, address common.Address, value *uint256.I
 	}
 }
 
+// NewPrecompile returns a new instance of a precompiled contract environment for the execution of EVM.
+func NewPrecompile(caller, object ContractRef, value *uint256.Int, gas uint64) *Contract {
+	c := &Contract{
+		caller:       caller.Address(),
+		address:      object.Address(),
+		isPrecompile: true,
+	}
+
+	// Gas should be a pointer so it can safely be reduced through the run
+	// This pointer will be off the state transition
+	c.Gas = gas
+	// ensures a value is set
+	c.value = value
+
+	return c
+}
+
+// IsPrecompile returns true if the contract is a precompiled contract environment
+func (c Contract) IsPrecompile() bool {
+	return c.isPrecompile
+}
+
 func (c *Contract) validJumpdest(dest *uint256.Int) bool {
+	if c.isPrecompile {
+		return false
+	}
+
 	udest, overflow := dest.Uint64WithOverflow()
 	// PC cannot go beyond len(code) and certainly can't be bigger than 63bits.
 	// Don't bother checking for JUMPDEST in that case.
@@ -78,6 +116,10 @@ func (c *Contract) validJumpdest(dest *uint256.Int) bool {
 // isCode returns true if the provided PC location is an actual opcode, as
 // opposed to a data-segment following a PUSHN operation.
 func (c *Contract) isCode(udest uint64) bool {
+	if c.isPrecompile {
+		return false
+	}
+
 	// Do we already have an analysis laying around?
 	if c.analysis != nil {
 		return c.analysis.codeSegment(udest)
@@ -160,6 +202,9 @@ func (c *Contract) Value() *uint256.Int {
 
 // SetCallCode sets the code of the contract,
 func (c *Contract) SetCallCode(hash common.Hash, code []byte) {
+	if c.isPrecompile {
+		return
+	}
 	c.Code = code
 	c.CodeHash = hash
 }
