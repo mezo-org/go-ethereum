@@ -17,6 +17,7 @@
 package vm
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -35,6 +36,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto/bn256"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/holiman/uint256"
 	"golang.org/x/crypto/ripemd160"
 )
 
@@ -42,97 +44,96 @@ import (
 // requires a deterministic gas count based on the input size of the Run method of the
 // contract.
 type PrecompiledContract interface {
-	RequiredGas(input []byte) uint64  // RequiredPrice calculates the contract gas use
-	Run(input []byte) ([]byte, error) // Run runs the precompiled contract
+	ContractRef
+	RequiredGas(input []byte) uint64                                 // RequiredPrice calculates the contract gas use
+	Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) // Run runs the precompiled contract
 }
 
 // PrecompiledContractsHomestead contains the default set of pre-compiled Ethereum
 // contracts used in the Frontier and Homestead releases.
 var PrecompiledContractsHomestead = map[common.Address]PrecompiledContract{
-	common.BytesToAddress([]byte{0x1}): &ecrecover{},
-	common.BytesToAddress([]byte{0x2}): &sha256hash{},
-	common.BytesToAddress([]byte{0x3}): &ripemd160hash{},
-	common.BytesToAddress([]byte{0x4}): &dataCopy{},
+	ecrecover{}.Address():     &ecrecover{},
+	sha256hash{}.Address():    &sha256hash{},
+	ripemd160hash{}.Address(): &ripemd160hash{},
+	dataCopy{}.Address():      &dataCopy{},
 }
 
 // PrecompiledContractsByzantium contains the default set of pre-compiled Ethereum
 // contracts used in the Byzantium release.
 var PrecompiledContractsByzantium = map[common.Address]PrecompiledContract{
-	common.BytesToAddress([]byte{0x1}): &ecrecover{},
-	common.BytesToAddress([]byte{0x2}): &sha256hash{},
-	common.BytesToAddress([]byte{0x3}): &ripemd160hash{},
-	common.BytesToAddress([]byte{0x4}): &dataCopy{},
-	common.BytesToAddress([]byte{0x5}): &bigModExp{eip2565: false},
-	common.BytesToAddress([]byte{0x6}): &bn256AddByzantium{},
-	common.BytesToAddress([]byte{0x7}): &bn256ScalarMulByzantium{},
-	common.BytesToAddress([]byte{0x8}): &bn256PairingByzantium{},
+	ecrecover{}.Address():               &ecrecover{},
+	sha256hash{}.Address():              &sha256hash{},
+	ripemd160hash{}.Address():           &ripemd160hash{},
+	dataCopy{}.Address():                &dataCopy{},
+	bigModExp{}.Address():               &bigModExp{eip2565: false},
+	bn256AddByzantium{}.Address():       &bn256AddByzantium{},
+	bn256ScalarMulByzantium{}.Address(): &bn256ScalarMulByzantium{},
+	bn256PairingByzantium{}.Address():   &bn256PairingByzantium{},
 }
 
-// PrecompiledContractsIstanbul contains the default set of pre-compiled Ethereum
-// contracts used in the Istanbul release.
 var PrecompiledContractsIstanbul = map[common.Address]PrecompiledContract{
-	common.BytesToAddress([]byte{0x1}): &ecrecover{},
-	common.BytesToAddress([]byte{0x2}): &sha256hash{},
-	common.BytesToAddress([]byte{0x3}): &ripemd160hash{},
-	common.BytesToAddress([]byte{0x4}): &dataCopy{},
-	common.BytesToAddress([]byte{0x5}): &bigModExp{eip2565: false},
-	common.BytesToAddress([]byte{0x6}): &bn256AddIstanbul{},
-	common.BytesToAddress([]byte{0x7}): &bn256ScalarMulIstanbul{},
-	common.BytesToAddress([]byte{0x8}): &bn256PairingIstanbul{},
-	common.BytesToAddress([]byte{0x9}): &blake2F{},
+	ecrecover{}.Address():              &ecrecover{},
+	sha256hash{}.Address():             &sha256hash{},
+	ripemd160hash{}.Address():          &ripemd160hash{},
+	dataCopy{}.Address():               &dataCopy{},
+	bigModExp{}.Address():              &bigModExp{eip2565: false},
+	bn256AddIstanbul{}.Address():       &bn256AddIstanbul{},
+	bn256ScalarMulIstanbul{}.Address(): &bn256ScalarMulIstanbul{},
+	bn256PairingIstanbul{}.Address():   &bn256PairingIstanbul{},
+	blake2F{}.Address():                &blake2F{},
 }
 
 // PrecompiledContractsBerlin contains the default set of pre-compiled Ethereum
 // contracts used in the Berlin release.
 var PrecompiledContractsBerlin = map[common.Address]PrecompiledContract{
-	common.BytesToAddress([]byte{0x1}): &ecrecover{},
-	common.BytesToAddress([]byte{0x2}): &sha256hash{},
-	common.BytesToAddress([]byte{0x3}): &ripemd160hash{},
-	common.BytesToAddress([]byte{0x4}): &dataCopy{},
-	common.BytesToAddress([]byte{0x5}): &bigModExp{eip2565: true},
-	common.BytesToAddress([]byte{0x6}): &bn256AddIstanbul{},
-	common.BytesToAddress([]byte{0x7}): &bn256ScalarMulIstanbul{},
-	common.BytesToAddress([]byte{0x8}): &bn256PairingIstanbul{},
-	common.BytesToAddress([]byte{0x9}): &blake2F{},
+	ecrecover{}.Address():              &ecrecover{},
+	sha256hash{}.Address():             &sha256hash{},
+	ripemd160hash{}.Address():          &ripemd160hash{},
+	dataCopy{}.Address():               &dataCopy{},
+	bigModExp{}.Address():              &bigModExp{eip2565: true},
+	bn256AddIstanbul{}.Address():       &bn256AddIstanbul{},
+	bn256ScalarMulIstanbul{}.Address(): &bn256ScalarMulIstanbul{},
+	bn256PairingIstanbul{}.Address():   &bn256PairingIstanbul{},
+	blake2F{}.Address():                &blake2F{},
 }
 
 // PrecompiledContractsCancun contains the default set of pre-compiled Ethereum
 // contracts used in the Cancun release.
 var PrecompiledContractsCancun = map[common.Address]PrecompiledContract{
-	common.BytesToAddress([]byte{0x1}): &ecrecover{},
-	common.BytesToAddress([]byte{0x2}): &sha256hash{},
-	common.BytesToAddress([]byte{0x3}): &ripemd160hash{},
-	common.BytesToAddress([]byte{0x4}): &dataCopy{},
-	common.BytesToAddress([]byte{0x5}): &bigModExp{eip2565: true},
-	common.BytesToAddress([]byte{0x6}): &bn256AddIstanbul{},
-	common.BytesToAddress([]byte{0x7}): &bn256ScalarMulIstanbul{},
-	common.BytesToAddress([]byte{0x8}): &bn256PairingIstanbul{},
-	common.BytesToAddress([]byte{0x9}): &blake2F{},
-	common.BytesToAddress([]byte{0xa}): &kzgPointEvaluation{},
+	ecrecover{}.Address():              &ecrecover{},
+	sha256hash{}.Address():             &sha256hash{},
+	ripemd160hash{}.Address():          &ripemd160hash{},
+	dataCopy{}.Address():               &dataCopy{},
+	bigModExp{}.Address():              &bigModExp{eip2565: true},
+	bn256AddIstanbul{}.Address():       &bn256AddIstanbul{},
+	bn256ScalarMulIstanbul{}.Address(): &bn256ScalarMulIstanbul{},
+	bn256PairingIstanbul{}.Address():   &bn256PairingIstanbul{},
+	blake2F{}.Address():                &blake2F{},
+	kzgPointEvaluation{}.Address():     &kzgPointEvaluation{},
 }
 
 // PrecompiledContractsPrague contains the set of pre-compiled Ethereum
 // contracts used in the Prague release.
 var PrecompiledContractsPrague = map[common.Address]PrecompiledContract{
-	common.BytesToAddress([]byte{0x01}): &ecrecover{},
-	common.BytesToAddress([]byte{0x02}): &sha256hash{},
-	common.BytesToAddress([]byte{0x03}): &ripemd160hash{},
-	common.BytesToAddress([]byte{0x04}): &dataCopy{},
-	common.BytesToAddress([]byte{0x05}): &bigModExp{eip2565: true},
-	common.BytesToAddress([]byte{0x06}): &bn256AddIstanbul{},
-	common.BytesToAddress([]byte{0x07}): &bn256ScalarMulIstanbul{},
-	common.BytesToAddress([]byte{0x08}): &bn256PairingIstanbul{},
-	common.BytesToAddress([]byte{0x09}): &blake2F{},
-	common.BytesToAddress([]byte{0x0a}): &kzgPointEvaluation{},
-	common.BytesToAddress([]byte{0x0b}): &bls12381G1Add{},
-	common.BytesToAddress([]byte{0x0c}): &bls12381G1Mul{},
-	common.BytesToAddress([]byte{0x0d}): &bls12381G1MultiExp{},
-	common.BytesToAddress([]byte{0x0e}): &bls12381G2Add{},
-	common.BytesToAddress([]byte{0x0f}): &bls12381G2Mul{},
-	common.BytesToAddress([]byte{0x10}): &bls12381G2MultiExp{},
-	common.BytesToAddress([]byte{0x11}): &bls12381Pairing{},
-	common.BytesToAddress([]byte{0x12}): &bls12381MapG1{},
-	common.BytesToAddress([]byte{0x13}): &bls12381MapG2{},
+	ecrecover{}.Address():              &ecrecover{},
+	sha256hash{}.Address():             &sha256hash{},
+	ripemd160hash{}.Address():          &ripemd160hash{},
+	dataCopy{}.Address():               &dataCopy{},
+	bigModExp{}.Address():              &bigModExp{eip2565: true},
+	bn256AddIstanbul{}.Address():       &bn256AddIstanbul{},
+	bn256ScalarMulIstanbul{}.Address(): &bn256ScalarMulIstanbul{},
+	bn256PairingIstanbul{}.Address():   &bn256PairingIstanbul{},
+	blake2F{}.Address():                &blake2F{},
+	kzgPointEvaluation{}.Address():     &kzgPointEvaluation{},
+	bls12381G1Add{}.Address():          &bls12381G1Add{},
+	bls12381G1Mul{}.Address():          &bls12381G1Mul{},
+	bls12381G1MultiExp{}.Address():     &bls12381G1MultiExp{},
+	bls12381G2Add{}.Address():          &bls12381G2Add{},
+	bls12381G2Mul{}.Address():          &bls12381G2Mul{},
+	bls12381G2MultiExp{}.Address():     &bls12381G2MultiExp{},
+	bls12381Pairing{}.Address():        &bls12381Pairing{},
+	bls12381MapG1{}.Address():          &bls12381MapG1{},
+	bls12381MapG2{}.Address():          &bls12381MapG2{},
 }
 
 var PrecompiledContractsBLS = PrecompiledContractsPrague
@@ -169,8 +170,8 @@ func init() {
 	}
 }
 
-// ActivePrecompiles returns the precompiles enabled with the current configuration.
-func ActivePrecompiles(rules params.Rules) []common.Address {
+// DefaultActivePrecompiles returns the set of precompiles enabled with the default configuration.
+func DefaultActivePrecompiles(rules params.Rules) []common.Address {
 	switch {
 	case rules.IsPrague:
 		return PrecompiledAddressesPrague
@@ -187,53 +188,167 @@ func ActivePrecompiles(rules params.Rules) []common.Address {
 	}
 }
 
+// DefaultPrecompiles define the mapping of address and precompiles from the default configuration
+func DefaultPrecompiles(rules params.Rules) (precompiles map[common.Address]PrecompiledContract) {
+	switch {
+	case rules.IsPrague:
+		precompiles = PrecompiledContractsPrague
+	case rules.IsCancun:
+		precompiles = PrecompiledContractsCancun
+	case rules.IsBerlin:
+		precompiles = PrecompiledContractsBerlin
+	case rules.IsIstanbul:
+		precompiles = PrecompiledContractsIstanbul
+	case rules.IsByzantium:
+		precompiles = PrecompiledContractsByzantium
+	default:
+		precompiles = PrecompiledContractsHomestead
+	}
+
+	return precompiles
+}
+
+// ActivePrecompiles returns the precompiles enabled with the current configuration.
+//
+// NOTE: The rules argument is ignored as the active precompiles can be set via the WithPrecompiles
+// method according to the chain rules from the current block context.
+func (evm *EVM) ActivePrecompiles(rules params.Rules) []common.Address {
+	return evm.activePrecompiles
+}
+
+// Precompile returns a precompiled contract for the given address. This
+// function returns false if the address is not a registered precompile.
+func (evm *EVM) Precompile(addr common.Address) (PrecompiledContract, bool) {
+	p, ok := evm.precompiles[addr]
+	return p, ok
+}
+
+// WithPrecompiles sets the precompiled contracts and the slice of actives precompiles.
+// IMPORTANT: This function does NOT validate the precompiles provided to the EVM. The caller should
+// use the ValidatePrecompiles function for this purpose prior to calling WithPrecompiles.
+func (evm *EVM) WithPrecompiles(
+	precompiles map[common.Address]PrecompiledContract,
+	activePrecompiles []common.Address,
+) {
+	evm.precompiles = precompiles
+	evm.activePrecompiles = activePrecompiles
+}
+
+// ValidatePrecompiles validates the precompile map against the active
+// precompile slice.
+// It returns an error if the precompiled contract map has a different length
+// than the slice of active contract addresses. This function also checks for
+// duplicates, invalid addresses and empty precompile contract instances.
+func ValidatePrecompiles(
+	precompiles map[common.Address]PrecompiledContract,
+	activePrecompiles []common.Address,
+) error {
+	if len(precompiles) != len(activePrecompiles) {
+		return fmt.Errorf("precompiles length mismatch (expected %d, got %d)", len(precompiles), len(activePrecompiles))
+	}
+
+	dupActivePrecompiles := make(map[common.Address]bool)
+
+	for _, addr := range activePrecompiles {
+		if dupActivePrecompiles[addr] {
+			return fmt.Errorf("duplicate active precompile: %s", addr)
+		}
+
+		precompile, ok := precompiles[addr]
+		if !ok {
+			return fmt.Errorf("active precompile address doesn't exist in precompiles map: %s", addr)
+		}
+
+		if precompile == nil {
+			return fmt.Errorf("precompile contract cannot be nil: %s", addr)
+		}
+
+		if bytes.Equal(addr.Bytes(), common.Address{}.Bytes()) {
+			return fmt.Errorf("precompile cannot be the zero address: %s", addr)
+		}
+
+		dupActivePrecompiles[addr] = true
+	}
+
+	return nil
+}
+
 // RunPrecompiledContract runs and evaluates the output of a precompiled contract.
 // It returns
 // - the returned bytes,
 // - the _remaining_ gas,
 // - any error that occurred
-func RunPrecompiledContract(p PrecompiledContract, input []byte, suppliedGas uint64, logger *tracing.Hooks) (ret []byte, remainingGas uint64, err error) {
+func (evm *EVM) RunPrecompiledContract(
+	p PrecompiledContract,
+	caller ContractRef,
+	input []byte,
+	suppliedGas uint64,
+	value *uint256.Int,
+	readOnly bool,
+) (ret []byte, remainingGas uint64, err error) {
+	return runPrecompiledContract(evm, p, caller, input, suppliedGas, value, readOnly)
+}
+
+func runPrecompiledContract(
+	evm *EVM,
+	p PrecompiledContract,
+	caller ContractRef,
+	input []byte,
+	suppliedGas uint64,
+	value *uint256.Int,
+	readOnly bool,
+) (ret []byte, remainingGas uint64, err error) {
+	addrCopy := p.Address()
+	inputCopy := make([]byte, len(input))
+	copy(inputCopy, input)
+
+	contract := NewPrecompile(caller, AccountRef(addrCopy), value, suppliedGas)
+	contract.Input = inputCopy
+
 	gasCost := p.RequiredGas(input)
-	if suppliedGas < gasCost {
-		return nil, 0, ErrOutOfGas
+	if !contract.UseGas(gasCost, evm.Config.Tracer, tracing.GasChangeCallPrecompiledContract) {
+		return nil, contract.Gas, ErrOutOfGas
 	}
-	if logger != nil && logger.OnGasChange != nil {
-		logger.OnGasChange(suppliedGas, suppliedGas-gasCost, tracing.GasChangeCallPrecompiledContract)
-	}
-	suppliedGas -= gasCost
-	output, err := p.Run(input)
-	return output, suppliedGas, err
+
+	output, err := p.Run(evm, contract, readOnly)
+	return output, contract.Gas, err
 }
 
 // ecrecover implemented as a native contract.
 type ecrecover struct{}
 
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (ecrecover) Address() common.Address {
+	return common.BytesToAddress([]byte{1})
+}
+
 func (c *ecrecover) RequiredGas(input []byte) uint64 {
 	return params.EcrecoverGas
 }
 
-func (c *ecrecover) Run(input []byte) ([]byte, error) {
+func (c *ecrecover) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
 	const ecRecoverInputLength = 128
 
-	input = common.RightPadBytes(input, ecRecoverInputLength)
+	contract.Input = common.RightPadBytes(contract.Input, ecRecoverInputLength)
 	// "input" is (hash, v, r, s), each 32 bytes
 	// but for ecrecover we want (r, s, v)
 
-	r := new(big.Int).SetBytes(input[64:96])
-	s := new(big.Int).SetBytes(input[96:128])
-	v := input[63] - 27
+	r := new(big.Int).SetBytes(contract.Input[64:96])
+	s := new(big.Int).SetBytes(contract.Input[96:128])
+	v := contract.Input[63] - 27
 
 	// tighter sig s values input homestead only apply to tx sigs
-	if !allZero(input[32:63]) || !crypto.ValidateSignatureValues(v, r, s, false) {
+	if !allZero(contract.Input[32:63]) || !crypto.ValidateSignatureValues(v, r, s, false) {
 		return nil, nil
 	}
 	// We must make sure not to modify the 'input', so placing the 'v' along with
 	// the signature needs to be done on a new allocation
 	sig := make([]byte, 65)
-	copy(sig, input[64:128])
+	copy(sig, contract.Input[64:128])
 	sig[64] = v
 	// v needs to be at the end for libsecp256k1
-	pubKey, err := crypto.Ecrecover(input[:32], sig)
+	pubKey, err := crypto.Ecrecover(contract.Input[:32], sig)
 	// make sure the public key is a valid one
 	if err != nil {
 		return nil, nil
@@ -246,6 +361,12 @@ func (c *ecrecover) Run(input []byte) ([]byte, error) {
 // SHA256 implemented as a native contract.
 type sha256hash struct{}
 
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (sha256hash) Address() common.Address {
+	return common.BytesToAddress([]byte{2})
+}
+
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 //
 // This method does not require any overflow checking as the input size gas costs
@@ -253,13 +374,19 @@ type sha256hash struct{}
 func (c *sha256hash) RequiredGas(input []byte) uint64 {
 	return uint64(len(input)+31)/32*params.Sha256PerWordGas + params.Sha256BaseGas
 }
-func (c *sha256hash) Run(input []byte) ([]byte, error) {
-	h := sha256.Sum256(input)
+func (c *sha256hash) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
+	h := sha256.Sum256(contract.Input)
 	return h[:], nil
 }
 
 // RIPEMD160 implemented as a native contract.
 type ripemd160hash struct{}
+
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (ripemd160hash) Address() common.Address {
+	return common.BytesToAddress([]byte{3})
+}
 
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 //
@@ -268,14 +395,21 @@ type ripemd160hash struct{}
 func (c *ripemd160hash) RequiredGas(input []byte) uint64 {
 	return uint64(len(input)+31)/32*params.Ripemd160PerWordGas + params.Ripemd160BaseGas
 }
-func (c *ripemd160hash) Run(input []byte) ([]byte, error) {
+func (c *ripemd160hash) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
 	ripemd := ripemd160.New()
-	ripemd.Write(input)
+	ripemd.Write(contract.Input)
 	return common.LeftPadBytes(ripemd.Sum(nil), 32), nil
 }
 
 // data copy implemented as a native contract.
 type dataCopy struct{}
+
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (dataCopy) Address() common.Address {
+	return common.BytesToAddress([]byte{4})
+}
+
 
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 //
@@ -284,8 +418,8 @@ type dataCopy struct{}
 func (c *dataCopy) RequiredGas(input []byte) uint64 {
 	return uint64(len(input)+31)/32*params.IdentityPerWordGas + params.IdentityBaseGas
 }
-func (c *dataCopy) Run(in []byte) ([]byte, error) {
-	return common.CopyBytes(in), nil
+func (c *dataCopy) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
+	return common.CopyBytes(contract.Input), nil
 }
 
 // bigModExp implements a native big integer exponential modular operation.
@@ -333,6 +467,12 @@ func modexpMultComplexity(x *big.Int) *big.Int {
 		)
 	}
 	return x
+}
+
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (bigModExp) Address() common.Address {
+	return common.BytesToAddress([]byte{5})
 }
 
 // RequiredGas returns the gas required to execute the pre-compiled contract.
@@ -406,16 +546,16 @@ func (c *bigModExp) RequiredGas(input []byte) uint64 {
 	return gas.Uint64()
 }
 
-func (c *bigModExp) Run(input []byte) ([]byte, error) {
+func (c *bigModExp) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
 	var (
-		baseLen = new(big.Int).SetBytes(getData(input, 0, 32)).Uint64()
-		expLen  = new(big.Int).SetBytes(getData(input, 32, 32)).Uint64()
-		modLen  = new(big.Int).SetBytes(getData(input, 64, 32)).Uint64()
+		baseLen = new(big.Int).SetBytes(getData(contract.Input, 0, 32)).Uint64()
+		expLen  = new(big.Int).SetBytes(getData(contract.Input, 32, 32)).Uint64()
+		modLen  = new(big.Int).SetBytes(getData(contract.Input, 64, 32)).Uint64()
 	)
-	if len(input) > 96 {
-		input = input[96:]
+	if len(contract.Input) > 96 {
+		contract.Input = contract.Input[96:]
 	} else {
-		input = input[:0]
+		contract.Input = contract.Input[:0]
 	}
 	// Handle a special case when both the base and mod length is zero
 	if baseLen == 0 && modLen == 0 {
@@ -423,9 +563,9 @@ func (c *bigModExp) Run(input []byte) ([]byte, error) {
 	}
 	// Retrieve the operands and execute the exponentiation
 	var (
-		base = new(big.Int).SetBytes(getData(input, 0, baseLen))
-		exp  = new(big.Int).SetBytes(getData(input, baseLen, expLen))
-		mod  = new(big.Int).SetBytes(getData(input, baseLen+expLen, modLen))
+		base = new(big.Int).SetBytes(getData(contract.Input, 0, baseLen))
+		exp  = new(big.Int).SetBytes(getData(contract.Input, baseLen, expLen))
+		mod  = new(big.Int).SetBytes(getData(contract.Input, baseLen+expLen, modLen))
 		v    []byte
 	)
 	switch {
@@ -486,21 +626,33 @@ func (c *bn256AddIstanbul) RequiredGas(input []byte) uint64 {
 	return params.Bn256AddGasIstanbul
 }
 
-func (c *bn256AddIstanbul) Run(input []byte) ([]byte, error) {
-	return runBn256Add(input)
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (bn256AddIstanbul) Address() common.Address {
+	return common.BytesToAddress([]byte{6})
+}
+
+func (c *bn256AddIstanbul) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
+	return runBn256Add(contract.Input)
 }
 
 // bn256AddByzantium implements a native elliptic curve point addition
 // conforming to Byzantium consensus rules.
 type bn256AddByzantium struct{}
 
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (bn256AddByzantium) Address() common.Address {
+	return common.BytesToAddress([]byte{6})
+}
+
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 func (c *bn256AddByzantium) RequiredGas(input []byte) uint64 {
 	return params.Bn256AddGasByzantium
 }
 
-func (c *bn256AddByzantium) Run(input []byte) ([]byte, error) {
-	return runBn256Add(input)
+func (c *bn256AddByzantium) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
+	return runBn256Add(contract.Input)
 }
 
 // runBn256ScalarMul implements the Bn256ScalarMul precompile, referenced by
@@ -519,26 +671,38 @@ func runBn256ScalarMul(input []byte) ([]byte, error) {
 // multiplication conforming to Istanbul consensus rules.
 type bn256ScalarMulIstanbul struct{}
 
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (bn256ScalarMulIstanbul) Address() common.Address {
+	return common.BytesToAddress([]byte{7})
+}
+
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 func (c *bn256ScalarMulIstanbul) RequiredGas(input []byte) uint64 {
 	return params.Bn256ScalarMulGasIstanbul
 }
 
-func (c *bn256ScalarMulIstanbul) Run(input []byte) ([]byte, error) {
-	return runBn256ScalarMul(input)
+func (c *bn256ScalarMulIstanbul) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
+	return runBn256ScalarMul(contract.Input)
 }
 
 // bn256ScalarMulByzantium implements a native elliptic curve scalar
 // multiplication conforming to Byzantium consensus rules.
 type bn256ScalarMulByzantium struct{}
 
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (bn256ScalarMulByzantium) Address() common.Address {
+	return common.BytesToAddress([]byte{7})
+}
+
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 func (c *bn256ScalarMulByzantium) RequiredGas(input []byte) uint64 {
 	return params.Bn256ScalarMulGasByzantium
 }
 
-func (c *bn256ScalarMulByzantium) Run(input []byte) ([]byte, error) {
-	return runBn256ScalarMul(input)
+func (c *bn256ScalarMulByzantium) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
+	return runBn256ScalarMul(contract.Input)
 }
 
 var (
@@ -587,29 +751,47 @@ func runBn256Pairing(input []byte) ([]byte, error) {
 // conforming to Istanbul consensus rules.
 type bn256PairingIstanbul struct{}
 
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (bn256PairingIstanbul) Address() common.Address {
+	return common.BytesToAddress([]byte{8})
+}
+
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 func (c *bn256PairingIstanbul) RequiredGas(input []byte) uint64 {
 	return params.Bn256PairingBaseGasIstanbul + uint64(len(input)/192)*params.Bn256PairingPerPointGasIstanbul
 }
 
-func (c *bn256PairingIstanbul) Run(input []byte) ([]byte, error) {
-	return runBn256Pairing(input)
+func (c *bn256PairingIstanbul) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
+	return runBn256Pairing(contract.Input)
 }
 
 // bn256PairingByzantium implements a pairing pre-compile for the bn256 curve
 // conforming to Byzantium consensus rules.
 type bn256PairingByzantium struct{}
 
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (bn256PairingByzantium) Address() common.Address {
+	return common.BytesToAddress([]byte{8})
+}
+
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 func (c *bn256PairingByzantium) RequiredGas(input []byte) uint64 {
 	return params.Bn256PairingBaseGasByzantium + uint64(len(input)/192)*params.Bn256PairingPerPointGasByzantium
 }
 
-func (c *bn256PairingByzantium) Run(input []byte) ([]byte, error) {
-	return runBn256Pairing(input)
+func (c *bn256PairingByzantium) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
+	return runBn256Pairing(contract.Input)
 }
 
 type blake2F struct{}
+
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (blake2F) Address() common.Address {
+	return common.BytesToAddress([]byte{9})
+}
 
 func (c *blake2F) RequiredGas(input []byte) uint64 {
 	// If the input is malformed, we can't calculate the gas, return 0 and let the
@@ -631,18 +813,18 @@ var (
 	errBlake2FInvalidFinalFlag   = errors.New("invalid final flag")
 )
 
-func (c *blake2F) Run(input []byte) ([]byte, error) {
+func (c *blake2F) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
 	// Make sure the input is valid (correct length and final flag)
-	if len(input) != blake2FInputLength {
+	if len(contract.Input) != blake2FInputLength {
 		return nil, errBlake2FInvalidInputLength
 	}
-	if input[212] != blake2FNonFinalBlockBytes && input[212] != blake2FFinalBlockBytes {
+	if contract.Input[212] != blake2FNonFinalBlockBytes && contract.Input[212] != blake2FFinalBlockBytes {
 		return nil, errBlake2FInvalidFinalFlag
 	}
 	// Parse the input into the Blake2b call parameters
 	var (
-		rounds = binary.BigEndian.Uint32(input[0:4])
-		final  = input[212] == blake2FFinalBlockBytes
+		rounds = binary.BigEndian.Uint32(contract.Input[0:4])
+		final  = contract.Input[212] == blake2FFinalBlockBytes
 
 		h [8]uint64
 		m [16]uint64
@@ -650,14 +832,14 @@ func (c *blake2F) Run(input []byte) ([]byte, error) {
 	)
 	for i := 0; i < 8; i++ {
 		offset := 4 + i*8
-		h[i] = binary.LittleEndian.Uint64(input[offset : offset+8])
+		h[i] = binary.LittleEndian.Uint64(contract.Input[offset : offset+8])
 	}
 	for i := 0; i < 16; i++ {
 		offset := 68 + i*8
-		m[i] = binary.LittleEndian.Uint64(input[offset : offset+8])
+		m[i] = binary.LittleEndian.Uint64(contract.Input[offset : offset+8])
 	}
-	t[0] = binary.LittleEndian.Uint64(input[196:204])
-	t[1] = binary.LittleEndian.Uint64(input[204:212])
+	t[0] = binary.LittleEndian.Uint64(contract.Input[196:204])
+	t[1] = binary.LittleEndian.Uint64(contract.Input[204:212])
 
 	// Execute the compression function, extract and return the result
 	blake2b.F(&h, m, t, final, rounds)
@@ -680,27 +862,33 @@ var (
 // bls12381G1Add implements EIP-2537 G1Add precompile.
 type bls12381G1Add struct{}
 
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (bls12381G1Add) Address() common.Address {
+	return common.BytesToAddress([]byte{10})
+}
+
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 func (c *bls12381G1Add) RequiredGas(input []byte) uint64 {
 	return params.Bls12381G1AddGas
 }
 
-func (c *bls12381G1Add) Run(input []byte) ([]byte, error) {
+func (c *bls12381G1Add) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
 	// Implements EIP-2537 G1Add precompile.
 	// > G1 addition call expects `256` bytes as an input that is interpreted as byte concatenation of two G1 points (`128` bytes each).
 	// > Output is an encoding of addition operation result - single G1 point (`128` bytes).
-	if len(input) != 256 {
+	if len(contract.Input) != 256 {
 		return nil, errBLS12381InvalidInputLength
 	}
 	var err error
 	var p0, p1 *bls12381.G1Affine
 
 	// Decode G1 point p_0
-	if p0, err = decodePointG1(input[:128]); err != nil {
+	if p0, err = decodePointG1(contract.Input[:128]); err != nil {
 		return nil, err
 	}
 	// Decode G1 point p_1
-	if p1, err = decodePointG1(input[128:]); err != nil {
+	if p1, err = decodePointG1(contract.Input[128:]); err != nil {
 		return nil, err
 	}
 
@@ -716,23 +904,29 @@ func (c *bls12381G1Add) Run(input []byte) ([]byte, error) {
 // bls12381G1Mul implements EIP-2537 G1Mul precompile.
 type bls12381G1Mul struct{}
 
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (bls12381G1Mul) Address() common.Address {
+	return common.BytesToAddress([]byte{11})
+}
+
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 func (c *bls12381G1Mul) RequiredGas(input []byte) uint64 {
 	return params.Bls12381G1MulGas
 }
 
-func (c *bls12381G1Mul) Run(input []byte) ([]byte, error) {
+func (c *bls12381G1Mul) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
 	// Implements EIP-2537 G1Mul precompile.
 	// > G1 multiplication call expects `160` bytes as an input that is interpreted as byte concatenation of encoding of G1 point (`128` bytes) and encoding of a scalar value (`32` bytes).
 	// > Output is an encoding of multiplication operation result - single G1 point (`128` bytes).
-	if len(input) != 160 {
+	if len(contract.Input) != 160 {
 		return nil, errBLS12381InvalidInputLength
 	}
 	var err error
 	var p0 *bls12381.G1Affine
 
 	// Decode G1 point
-	if p0, err = decodePointG1(input[:128]); err != nil {
+	if p0, err = decodePointG1(contract.Input[:128]); err != nil {
 		return nil, err
 	}
 	// 'point is on curve' check already done,
@@ -741,7 +935,7 @@ func (c *bls12381G1Mul) Run(input []byte) ([]byte, error) {
 		return nil, errBLS12381G1PointSubgroup
 	}
 	// Decode scalar value
-	e := new(big.Int).SetBytes(input[128:])
+	e := new(big.Int).SetBytes(contract.Input[128:])
 
 	// Compute r = e * p_0
 	r := new(bls12381.G1Affine)
@@ -753,6 +947,12 @@ func (c *bls12381G1Mul) Run(input []byte) ([]byte, error) {
 
 // bls12381G1MultiExp implements EIP-2537 G1MultiExp precompile.
 type bls12381G1MultiExp struct{}
+
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (bls12381G1MultiExp) Address() common.Address {
+	return common.BytesToAddress([]byte{12})
+}
 
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 func (c *bls12381G1MultiExp) RequiredGas(input []byte) uint64 {
@@ -773,12 +973,12 @@ func (c *bls12381G1MultiExp) RequiredGas(input []byte) uint64 {
 	return (uint64(k) * params.Bls12381G1MulGas * discount) / 1000
 }
 
-func (c *bls12381G1MultiExp) Run(input []byte) ([]byte, error) {
+func (c *bls12381G1MultiExp) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
 	// Implements EIP-2537 G1MultiExp precompile.
 	// G1 multiplication call expects `160*k` bytes as an input that is interpreted as byte concatenation of `k` slices each of them being a byte concatenation of encoding of G1 point (`128` bytes) and encoding of a scalar value (`32` bytes).
 	// Output is an encoding of multiexponentiation operation result - single G1 point (`128` bytes).
-	k := len(input) / 160
-	if len(input) == 0 || len(input)%160 != 0 {
+	k := len(contract.Input) / 160
+	if len(contract.Input) == 0 || len(contract.Input)%160 != 0 {
 		return nil, errBLS12381InvalidInputLength
 	}
 	points := make([]bls12381.G1Affine, k)
@@ -789,7 +989,7 @@ func (c *bls12381G1MultiExp) Run(input []byte) ([]byte, error) {
 		off := 160 * i
 		t0, t1, t2 := off, off+128, off+160
 		// Decode G1 point
-		p, err := decodePointG1(input[t0:t1])
+		p, err := decodePointG1(contract.Input[t0:t1])
 		if err != nil {
 			return nil, err
 		}
@@ -800,7 +1000,7 @@ func (c *bls12381G1MultiExp) Run(input []byte) ([]byte, error) {
 		}
 		points[i] = *p
 		// Decode scalar value
-		scalars[i] = *new(fr.Element).SetBytes(input[t1:t2])
+		scalars[i] = *new(fr.Element).SetBytes(contract.Input[t1:t2])
 	}
 
 	// Compute r = e_0 * p_0 + e_1 * p_1 + ... + e_(k-1) * p_(k-1)
@@ -814,27 +1014,33 @@ func (c *bls12381G1MultiExp) Run(input []byte) ([]byte, error) {
 // bls12381G2Add implements EIP-2537 G2Add precompile.
 type bls12381G2Add struct{}
 
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (bls12381G2Add) Address() common.Address {
+	return common.BytesToAddress([]byte{13})
+}
+
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 func (c *bls12381G2Add) RequiredGas(input []byte) uint64 {
 	return params.Bls12381G2AddGas
 }
 
-func (c *bls12381G2Add) Run(input []byte) ([]byte, error) {
+func (c *bls12381G2Add) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
 	// Implements EIP-2537 G2Add precompile.
 	// > G2 addition call expects `512` bytes as an input that is interpreted as byte concatenation of two G2 points (`256` bytes each).
 	// > Output is an encoding of addition operation result - single G2 point (`256` bytes).
-	if len(input) != 512 {
+	if len(contract.Input) != 512 {
 		return nil, errBLS12381InvalidInputLength
 	}
 	var err error
 	var p0, p1 *bls12381.G2Affine
 
 	// Decode G2 point p_0
-	if p0, err = decodePointG2(input[:256]); err != nil {
+	if p0, err = decodePointG2(contract.Input[:256]); err != nil {
 		return nil, err
 	}
 	// Decode G2 point p_1
-	if p1, err = decodePointG2(input[256:]); err != nil {
+	if p1, err = decodePointG2(contract.Input[256:]); err != nil {
 		return nil, err
 	}
 
@@ -851,23 +1057,29 @@ func (c *bls12381G2Add) Run(input []byte) ([]byte, error) {
 // bls12381G2Mul implements EIP-2537 G2Mul precompile.
 type bls12381G2Mul struct{}
 
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (bls12381G2Mul) Address() common.Address {
+	return common.BytesToAddress([]byte{14})
+}
+
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 func (c *bls12381G2Mul) RequiredGas(input []byte) uint64 {
 	return params.Bls12381G2MulGas
 }
 
-func (c *bls12381G2Mul) Run(input []byte) ([]byte, error) {
+func (c *bls12381G2Mul) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
 	// Implements EIP-2537 G2MUL precompile logic.
 	// > G2 multiplication call expects `288` bytes as an input that is interpreted as byte concatenation of encoding of G2 point (`256` bytes) and encoding of a scalar value (`32` bytes).
 	// > Output is an encoding of multiplication operation result - single G2 point (`256` bytes).
-	if len(input) != 288 {
+	if len(contract.Input) != 288 {
 		return nil, errBLS12381InvalidInputLength
 	}
 	var err error
 	var p0 *bls12381.G2Affine
 
 	// Decode G2 point
-	if p0, err = decodePointG2(input[:256]); err != nil {
+	if p0, err = decodePointG2(contract.Input[:256]); err != nil {
 		return nil, err
 	}
 	// 'point is on curve' check already done,
@@ -876,7 +1088,7 @@ func (c *bls12381G2Mul) Run(input []byte) ([]byte, error) {
 		return nil, errBLS12381G2PointSubgroup
 	}
 	// Decode scalar value
-	e := new(big.Int).SetBytes(input[256:])
+	e := new(big.Int).SetBytes(contract.Input[256:])
 
 	// Compute r = e * p_0
 	r := new(bls12381.G2Affine)
@@ -888,6 +1100,12 @@ func (c *bls12381G2Mul) Run(input []byte) ([]byte, error) {
 
 // bls12381G2MultiExp implements EIP-2537 G2MultiExp precompile.
 type bls12381G2MultiExp struct{}
+
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (bls12381G2MultiExp) Address() common.Address {
+	return common.BytesToAddress([]byte{15})
+}
 
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 func (c *bls12381G2MultiExp) RequiredGas(input []byte) uint64 {
@@ -908,12 +1126,12 @@ func (c *bls12381G2MultiExp) RequiredGas(input []byte) uint64 {
 	return (uint64(k) * params.Bls12381G2MulGas * discount) / 1000
 }
 
-func (c *bls12381G2MultiExp) Run(input []byte) ([]byte, error) {
+func (c *bls12381G2MultiExp) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
 	// Implements EIP-2537 G2MultiExp precompile logic
 	// > G2 multiplication call expects `288*k` bytes as an input that is interpreted as byte concatenation of `k` slices each of them being a byte concatenation of encoding of G2 point (`256` bytes) and encoding of a scalar value (`32` bytes).
 	// > Output is an encoding of multiexponentiation operation result - single G2 point (`256` bytes).
-	k := len(input) / 288
-	if len(input) == 0 || len(input)%288 != 0 {
+	k := len(contract.Input) / 288
+	if len(contract.Input) == 0 || len(contract.Input)%288 != 0 {
 		return nil, errBLS12381InvalidInputLength
 	}
 	points := make([]bls12381.G2Affine, k)
@@ -924,7 +1142,7 @@ func (c *bls12381G2MultiExp) Run(input []byte) ([]byte, error) {
 		off := 288 * i
 		t0, t1, t2 := off, off+256, off+288
 		// Decode G2 point
-		p, err := decodePointG2(input[t0:t1])
+		p, err := decodePointG2(contract.Input[t0:t1])
 		if err != nil {
 			return nil, err
 		}
@@ -935,7 +1153,7 @@ func (c *bls12381G2MultiExp) Run(input []byte) ([]byte, error) {
 		}
 		points[i] = *p
 		// Decode scalar value
-		scalars[i] = *new(fr.Element).SetBytes(input[t1:t2])
+		scalars[i] = *new(fr.Element).SetBytes(contract.Input[t1:t2])
 	}
 
 	// Compute r = e_0 * p_0 + e_1 * p_1 + ... + e_(k-1) * p_(k-1)
@@ -949,20 +1167,26 @@ func (c *bls12381G2MultiExp) Run(input []byte) ([]byte, error) {
 // bls12381Pairing implements EIP-2537 Pairing precompile.
 type bls12381Pairing struct{}
 
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (bls12381Pairing) Address() common.Address {
+	return common.BytesToAddress([]byte{16})
+}
+
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 func (c *bls12381Pairing) RequiredGas(input []byte) uint64 {
 	return params.Bls12381PairingBaseGas + uint64(len(input)/384)*params.Bls12381PairingPerPairGas
 }
 
-func (c *bls12381Pairing) Run(input []byte) ([]byte, error) {
+func (c *bls12381Pairing) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
 	// Implements EIP-2537 Pairing precompile logic.
 	// > Pairing call expects `384*k` bytes as an inputs that is interpreted as byte concatenation of `k` slices. Each slice has the following structure:
 	// > - `128` bytes of G1 point encoding
 	// > - `256` bytes of G2 point encoding
 	// > Output is a `32` bytes where last single byte is `0x01` if pairing result is equal to multiplicative identity in a pairing target field and `0x00` otherwise
 	// > (which is equivalent of Big Endian encoding of Solidity values `uint256(1)` and `uin256(0)` respectively).
-	k := len(input) / 384
-	if len(input) == 0 || len(input)%384 != 0 {
+	k := len(contract.Input) / 384
+	if len(contract.Input) == 0 || len(contract.Input)%384 != 0 {
 		return nil, errBLS12381InvalidInputLength
 	}
 
@@ -977,12 +1201,12 @@ func (c *bls12381Pairing) Run(input []byte) ([]byte, error) {
 		t0, t1, t2 := off, off+128, off+384
 
 		// Decode G1 point
-		p1, err := decodePointG1(input[t0:t1])
+		p1, err := decodePointG1(contract.Input[t0:t1])
 		if err != nil {
 			return nil, err
 		}
 		// Decode G2 point
-		p2, err := decodePointG2(input[t1:t2])
+		p2, err := decodePointG2(contract.Input[t1:t2])
 		if err != nil {
 			return nil, err
 		}
@@ -1101,21 +1325,27 @@ func encodePointG2(p *bls12381.G2Affine) []byte {
 // bls12381MapG1 implements EIP-2537 MapG1 precompile.
 type bls12381MapG1 struct{}
 
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (bls12381MapG1) Address() common.Address {
+	return common.BytesToAddress([]byte{17})
+}
+
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 func (c *bls12381MapG1) RequiredGas(input []byte) uint64 {
 	return params.Bls12381MapG1Gas
 }
 
-func (c *bls12381MapG1) Run(input []byte) ([]byte, error) {
+func (c *bls12381MapG1) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
 	// Implements EIP-2537 Map_To_G1 precompile.
 	// > Field-to-curve call expects an `64` bytes input that is interpreted as an element of the base field.
 	// > Output of this call is `128` bytes and is G1 point following respective encoding rules.
-	if len(input) != 64 {
+	if len(contract.Input) != 64 {
 		return nil, errBLS12381InvalidInputLength
 	}
 
 	// Decode input field element
-	fe, err := decodeBLS12381FieldElement(input)
+	fe, err := decodeBLS12381FieldElement(contract.Input)
 	if err != nil {
 		return nil, err
 	}
@@ -1130,25 +1360,31 @@ func (c *bls12381MapG1) Run(input []byte) ([]byte, error) {
 // bls12381MapG2 implements EIP-2537 MapG2 precompile.
 type bls12381MapG2 struct{}
 
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (bls12381MapG2) Address() common.Address {
+	return common.BytesToAddress([]byte{18})
+}
+
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 func (c *bls12381MapG2) RequiredGas(input []byte) uint64 {
 	return params.Bls12381MapG2Gas
 }
 
-func (c *bls12381MapG2) Run(input []byte) ([]byte, error) {
+func (c *bls12381MapG2) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
 	// Implements EIP-2537 Map_FP2_TO_G2 precompile logic.
 	// > Field-to-curve call expects an `128` bytes input that is interpreted as an element of the quadratic extension field.
 	// > Output of this call is `256` bytes and is G2 point following respective encoding rules.
-	if len(input) != 128 {
+	if len(contract.Input) != 128 {
 		return nil, errBLS12381InvalidInputLength
 	}
 
 	// Decode input field element
-	c0, err := decodeBLS12381FieldElement(input[:64])
+	c0, err := decodeBLS12381FieldElement(contract.Input[:64])
 	if err != nil {
 		return nil, err
 	}
-	c1, err := decodeBLS12381FieldElement(input[64:])
+	c1, err := decodeBLS12381FieldElement(contract.Input[64:])
 	if err != nil {
 		return nil, err
 	}
@@ -1162,6 +1398,12 @@ func (c *bls12381MapG2) Run(input []byte) ([]byte, error) {
 
 // kzgPointEvaluation implements the EIP-4844 point evaluation precompile.
 type kzgPointEvaluation struct{}
+
+// Address defines the precompiled contract address. This MUST match the address
+// set in the precompiled contract map.
+func (kzgPointEvaluation) Address() common.Address {
+	return common.BytesToAddress([]byte{4})
+}
 
 // RequiredGas estimates the gas required for running the point evaluation precompile.
 func (b *kzgPointEvaluation) RequiredGas(input []byte) uint64 {
@@ -1181,33 +1423,33 @@ var (
 )
 
 // Run executes the point evaluation precompile.
-func (b *kzgPointEvaluation) Run(input []byte) ([]byte, error) {
-	if len(input) != blobVerifyInputLength {
+func (b *kzgPointEvaluation) Run(evm *EVM, contract *Contract, readonly bool) ([]byte, error) {
+	if len(contract.Input) != blobVerifyInputLength {
 		return nil, errBlobVerifyInvalidInputLength
 	}
 	// versioned hash: first 32 bytes
 	var versionedHash common.Hash
-	copy(versionedHash[:], input[:])
+	copy(versionedHash[:], contract.Input[:])
 
 	var (
 		point kzg4844.Point
 		claim kzg4844.Claim
 	)
 	// Evaluation point: next 32 bytes
-	copy(point[:], input[32:])
+	copy(point[:], contract.Input[32:])
 	// Expected output: next 32 bytes
-	copy(claim[:], input[64:])
+	copy(claim[:], contract.Input[64:])
 
 	// input kzg point: next 48 bytes
 	var commitment kzg4844.Commitment
-	copy(commitment[:], input[96:])
+	copy(commitment[:], contract.Input[96:])
 	if kZGToVersionedHash(commitment) != versionedHash {
 		return nil, errBlobVerifyMismatchedVersion
 	}
 
 	// Proof: next 48 bytes
 	var proof kzg4844.Proof
-	copy(proof[:], input[144:])
+	copy(proof[:], contract.Input[144:])
 
 	if err := kzg4844.VerifyProof(commitment, point, claim, proof); err != nil {
 		return nil, fmt.Errorf("%w: %v", errBlobVerifyKZGProof, err)

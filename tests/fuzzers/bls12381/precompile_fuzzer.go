@@ -22,6 +22,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/holiman/uint256"
 )
 
 const (
@@ -82,7 +83,9 @@ func fuzz(id byte, data []byte) int {
 	}
 	cpy := make([]byte, len(data))
 	copy(cpy, data)
-	_, err := precompile.Run(cpy)
+	contract := vm.NewPrecompile(vm.AccountRef(common.Address{}), precompile, new(uint256.Int).SetUint64(0), gas)
+	contract.Input = cpy
+	_, err := precompile.Run(nil, contract, false)
 	if !bytes.Equal(cpy, data) {
 		panic(fmt.Sprintf("input data modified, precompile %d: %x %x", id, data, cpy))
 	}
