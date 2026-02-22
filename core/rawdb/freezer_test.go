@@ -22,8 +22,6 @@ import (
 	"fmt"
 	"math/big"
 	"math/rand"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 
@@ -33,7 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var freezerTestTableDef = map[string]bool{"test": true}
+var freezerTestTableDef = map[string]freezerTableConfig{"test": {noSnappy: true}}
 
 func TestFreezerModify(t *testing.T) {
 	t.Parallel()
@@ -49,7 +47,7 @@ func TestFreezerModify(t *testing.T) {
 		valuesRLP = append(valuesRLP, iv)
 	}
 
-	tables := map[string]bool{"raw": true, "rlp": false}
+	tables := map[string]freezerTableConfig{"raw": {noSnappy: true}, "rlp": {noSnappy: false}}
 	f, _ := newFreezerForTesting(t, tables)
 	defer f.Close()
 
@@ -113,7 +111,7 @@ func TestFreezerModifyRollback(t *testing.T) {
 	f.Close()
 
 	// Reopen and check that the rolled-back data doesn't reappear.
-	tables := map[string]bool{"test": true}
+	tables := map[string]freezerTableConfig{"test": {noSnappy: true}}
 	f2, err := NewFreezer(dir, "", false, 2049, tables)
 	if err != nil {
 		t.Fatalf("can't reopen freezer after failed ModifyAncients: %v", err)
@@ -241,7 +239,7 @@ func TestFreezerConcurrentModifyTruncate(t *testing.T) {
 		// fails, otherwise it succeeds. In either case, the freezer should be positioned
 		// at 10 after both operations are done.
 		if truncateErr != nil {
-			t.Fatal("concurrent truncate failed:", err)
+			t.Fatal("concurrent truncate failed:", truncateErr)
 		}
 		if !(errors.Is(modifyErr, nil) || errors.Is(modifyErr, errOutOrderInsertion)) {
 			t.Fatal("wrong error from concurrent modify:", modifyErr)
@@ -251,7 +249,7 @@ func TestFreezerConcurrentModifyTruncate(t *testing.T) {
 }
 
 func TestFreezerReadonlyValidate(t *testing.T) {
-	tables := map[string]bool{"a": true, "b": true}
+	tables := map[string]freezerTableConfig{"a": {noSnappy: true}, "b": {noSnappy: true}}
 	dir := t.TempDir()
 	// Open non-readonly freezer and fill individual tables
 	// with different amount of data.
@@ -287,7 +285,7 @@ func TestFreezerReadonlyValidate(t *testing.T) {
 func TestFreezerConcurrentReadonly(t *testing.T) {
 	t.Parallel()
 
-	tables := map[string]bool{"a": true}
+	tables := map[string]freezerTableConfig{"a": {noSnappy: true}}
 	dir := t.TempDir()
 
 	f, err := NewFreezer(dir, "", false, 2049, tables)
@@ -335,7 +333,7 @@ func TestFreezerConcurrentReadonly(t *testing.T) {
 	}
 }
 
-func newFreezerForTesting(t *testing.T, tables map[string]bool) (*Freezer, string) {
+func newFreezerForTesting(t *testing.T, tables map[string]freezerTableConfig) (*Freezer, string) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -359,9 +357,6 @@ func checkAncientCount(t *testing.T, f *Freezer, kind string, n uint64) {
 	// Check at index n-1.
 	if n > 0 {
 		index := n - 1
-		if ok, _ := f.HasAncient(kind, index); !ok {
-			t.Errorf("HasAncient(%q, %d) returned false unexpectedly", kind, index)
-		}
 		if _, err := f.Ancient(kind, index); err != nil {
 			t.Errorf("Ancient(%q, %d) returned unexpected error %q", kind, index, err)
 		}
@@ -369,9 +364,6 @@ func checkAncientCount(t *testing.T, f *Freezer, kind string, n uint64) {
 
 	// Check at index n.
 	index := n
-	if ok, _ := f.HasAncient(kind, index); ok {
-		t.Errorf("HasAncient(%q, %d) returned true unexpectedly", kind, index)
-	}
 	if _, err := f.Ancient(kind, index); err == nil {
 		t.Errorf("Ancient(%q, %d) didn't return expected error", kind, index)
 	} else if err != errOutOfBounds {
@@ -379,90 +371,9 @@ func checkAncientCount(t *testing.T, f *Freezer, kind string, n uint64) {
 	}
 }
 
-func TestRenameWindows(t *testing.T) {
-	var (
-		fname   = "file.bin"
-		fname2  = "file2.bin"
-		data    = []byte{1, 2, 3, 4}
-		data2   = []byte{2, 3, 4, 5}
-		data3   = []byte{3, 5, 6, 7}
-		dataLen = 4
-	)
-
-	// Create 2 temp dirs
-	dir1 := t.TempDir()
-	dir2 := t.TempDir()
-
-	// Create file in dir1 and fill with data
-	f, err := os.Create(filepath.Join(dir1, fname))
-	if err != nil {
-		t.Fatal(err)
-	}
-	f2, err := os.Create(filepath.Join(dir1, fname2))
-	if err != nil {
-		t.Fatal(err)
-	}
-	f3, err := os.Create(filepath.Join(dir2, fname2))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.Write(data); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f2.Write(data2); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f3.Write(data3); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := f2.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := f3.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(f.Name(), filepath.Join(dir2, fname)); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(f2.Name(), filepath.Join(dir2, fname2)); err != nil {
-		t.Fatal(err)
-	}
-
-	// Check file contents
-	f, err = os.Open(filepath.Join(dir2, fname))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	defer os.Remove(f.Name())
-	buf := make([]byte, dataLen)
-	if _, err := f.Read(buf); err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(buf, data) {
-		t.Errorf("unexpected file contents. Got %v\n", buf)
-	}
-
-	f, err = os.Open(filepath.Join(dir2, fname2))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	defer os.Remove(f.Name())
-	if _, err := f.Read(buf); err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(buf, data2) {
-		t.Errorf("unexpected file contents. Got %v\n", buf)
-	}
-}
-
 func TestFreezerCloseSync(t *testing.T) {
 	t.Parallel()
-	f, _ := newFreezerForTesting(t, map[string]bool{"a": true, "b": true})
+	f, _ := newFreezerForTesting(t, map[string]freezerTableConfig{"a": {noSnappy: true}, "b": {noSnappy: true}})
 	defer f.Close()
 
 	// Now, close and sync. This mimics the behaviour if the node is shut down,
@@ -475,7 +386,7 @@ func TestFreezerCloseSync(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Sync(); err == nil {
+	if err := f.SyncAncient(); err == nil {
 		t.Fatalf("want error, have nil")
 	} else if have, want := err.Error(), "[closed closed]"; have != want {
 		t.Fatalf("want %v, have %v", have, want)
@@ -484,17 +395,23 @@ func TestFreezerCloseSync(t *testing.T) {
 
 func TestFreezerSuite(t *testing.T) {
 	ancienttest.TestAncientSuite(t, func(kinds []string) ethdb.AncientStore {
-		tables := make(map[string]bool)
+		tables := make(map[string]freezerTableConfig)
 		for _, kind := range kinds {
-			tables[kind] = true
+			tables[kind] = freezerTableConfig{
+				noSnappy: true,
+				prunable: true,
+			}
 		}
 		f, _ := newFreezerForTesting(t, tables)
 		return f
 	})
 	ancienttest.TestResettableAncientSuite(t, func(kinds []string) ethdb.ResettableAncientStore {
-		tables := make(map[string]bool)
+		tables := make(map[string]freezerTableConfig)
 		for _, kind := range kinds {
-			tables[kind] = true
+			tables[kind] = freezerTableConfig{
+				noSnappy: true,
+				prunable: true,
+			}
 		}
 		f, _ := newResettableFreezer(t.TempDir(), "", false, 2048, tables)
 		return f

@@ -160,11 +160,8 @@ func prune(snaptree *snapshot.Tree, root common.Hash, maindb ethdb.Database, sta
 
 			var eta time.Duration // Realistically will never remain uninited
 			if done := binary.BigEndian.Uint64(key[:8]); done > 0 {
-				var (
-					left  = math.MaxUint64 - binary.BigEndian.Uint64(key[:8])
-					speed = done/uint64(time.Since(pstart)/time.Millisecond+1) + 1 // +1s to avoid division by zero
-				)
-				eta = time.Duration(left/speed) * time.Millisecond
+				left := math.MaxUint64 - binary.BigEndian.Uint64(key[:8])
+				eta = common.CalculateETA(done, left, time.Since(pstart))
 			}
 			if time.Since(logged) > 8*time.Second {
 				log.Info("Pruning state data", "nodes", count, "skipped", skipped, "size", size,
@@ -270,11 +267,10 @@ func (p *Pruner) Prune(root common.Hash) error {
 	// is the presence of root can indicate the presence of the
 	// entire trie.
 	if !rawdb.HasLegacyTrieNode(p.db, root) {
-		// The special case is for clique based networks(goerli
-		// and some other private networks), it's possible that two
-		// consecutive blocks will have same root. In this case snapshot
-		// difflayer won't be created. So HEAD-127 may not paired with
-		// head-127 layer. Instead the paired layer is higher than the
+		// The special case is for clique based networks, it's possible
+		// that two consecutive blocks will have same root. In this case
+		// snapshot difflayer won't be created. So HEAD-127 may not paired
+		// with head-127 layer. Instead the paired layer is higher than the
 		// bottom-most diff layer. Try to find the bottom-most snapshot
 		// layer with state available.
 		//
