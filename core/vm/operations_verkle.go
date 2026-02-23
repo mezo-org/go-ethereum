@@ -55,21 +55,10 @@ func gasExtCodeHash4762(evm *EVM, contract *Contract, stack *Stack, mem *Memory,
 
 func makeCallVariantGasEIP4762(oldCalculator gasFunc, withTransferCosts bool) gasFunc {
 	return func(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
-<<<<<<< HEAD
-		gas, err := oldCalculator(evm, contract, stack, mem, memorySize)
-		if err != nil {
-			return 0, err
-		}
-		if _, isPrecompile := evm.Precompile(contract.Address()); isPrecompile {
-			return gas, nil
-		}
-		witnessGas := evm.AccessEvents.MessageCallGas(contract.Address())
-		if witnessGas == 0 {
-=======
 		var (
 			target           = common.Address(stack.Back(1).Bytes20())
 			witnessGas       uint64
-			_, isPrecompile  = evm.precompile(target)
+			_, isPrecompile  = evm.Precompile(target)
 			isSystemContract = target == params.HistoryStorageAddress
 		)
 
@@ -82,7 +71,6 @@ func makeCallVariantGasEIP4762(oldCalculator gasFunc, withTransferCosts bool) ga
 			}
 			witnessGas = wantedValueTransferWitnessGas
 		} else if isPrecompile || isSystemContract {
->>>>>>> v1.16.8
 			witnessGas = params.WarmStorageReadCostEIP2929
 		} else {
 			// The charging for the value transfer is done BEFORE subtracting
@@ -134,7 +122,7 @@ func gasSelfdestructEIP4762(evm *EVM, contract *Contract, stack *Stack, mem *Mem
 	}
 	statelessGas := wanted
 	balanceIsZero := evm.StateDB.GetBalance(contractAddr).Sign() == 0
-	_, isPrecompile := evm.precompile(beneficiaryAddr)
+	_, isPrecompile := evm.Precompile(beneficiaryAddr)
 	isSystemContract := beneficiaryAddr == params.HistoryStorageAddress
 
 	if (isPrecompile || isSystemContract) && balanceIsZero {
@@ -200,7 +188,7 @@ func gasExtCodeCopyEIP4762(evm *EVM, contract *Contract, stack *Stack, mem *Memo
 		return 0, err
 	}
 	addr := common.Address(stack.peek().Bytes20())
-	_, isPrecompile := evm.precompile(addr)
+	_, isPrecompile := evm.Precompile(addr)
 	if isPrecompile || addr == params.HistoryStorageAddress {
 		var overflow bool
 		if gas, overflow = math.SafeAdd(gas, params.WarmStorageReadCostEIP2929); overflow {

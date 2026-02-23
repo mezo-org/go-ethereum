@@ -22,6 +22,17 @@ import (
 	"github.com/holiman/uint256"
 )
 
+// ContractRef is a reference to a contract-like object by address.
+type ContractRef interface {
+	Address() common.Address
+}
+
+// AccountRef implements ContractRef.
+type AccountRef common.Address
+
+// Address casts AccountRef to common.Address.
+func (ar AccountRef) Address() common.Address { return common.Address(ar) }
+
 // Contract represents an ethereum contract in the state database. It contains
 // the contract code, calling arguments. Contract implements ContractRef
 type Contract struct {
@@ -65,10 +76,9 @@ func NewContract(caller common.Address, address common.Address, value *uint256.I
 // NewPrecompile returns a new instance of a precompiled contract environment for the execution of EVM.
 func NewPrecompile(caller, object ContractRef, value *uint256.Int, gas uint64) *Contract {
 	c := &Contract{
-		CallerAddress: caller.Address(),
-		caller:        caller,
-		self:          object,
-		isPrecompile:  true,
+		caller:       caller.Address(),
+		address:      object.Address(),
+		isPrecompile: true,
 	}
 
 	// Gas should be a pointer so it can safely be reduced through the run
@@ -140,24 +150,6 @@ func (c *Contract) isCode(udest uint64) bool {
 	return c.analysis.codeSegment(udest)
 }
 
-<<<<<<< HEAD
-// AsDelegate sets the contract to be a delegate call and returns the current
-// contract (for chaining calls)
-func (c *Contract) AsDelegate() *Contract {
-	if c.isPrecompile {
-		return c
-	}
-	// NOTE: caller must, at all times be a contract. It should never happen
-	// that caller is something other than a Contract.
-	parent := c.caller.(*Contract)
-	c.CallerAddress = parent.CallerAddress
-	c.value = parent.value
-
-	return c
-}
-
-=======
->>>>>>> v1.16.8
 // GetOp returns the n'th element in the contract's byte array
 func (c *Contract) GetOp(n uint64) OpCode {
 	if n < uint64(len(c.Code)) {
@@ -208,31 +200,11 @@ func (c *Contract) Value() *uint256.Int {
 	return c.value
 }
 
-<<<<<<< HEAD
-// SetCallCode sets the code of the contract and address of the backing data
-// object
-func (c *Contract) SetCallCode(addr *common.Address, hash common.Hash, code []byte) {
-	if c.isPrecompile {
-		return
-	}
-	c.Code = code
-	c.CodeHash = hash
-	c.CodeAddr = addr
-}
-
-// SetCodeOptionalHash can be used to provide code, but it's optional to provide hash.
-// In case hash is not provided, the jumpdest analysis will not be saved to the parent context
-func (c *Contract) SetCodeOptionalHash(addr *common.Address, codeAndHash *codeAndHash) {
-	if c.isPrecompile {
-		return
-	}
-	c.Code = codeAndHash.code
-	c.CodeHash = codeAndHash.hash
-	c.CodeAddr = addr
-=======
 // SetCallCode sets the code of the contract,
 func (c *Contract) SetCallCode(hash common.Hash, code []byte) {
+	if c.isPrecompile {
+		return
+	}
 	c.Code = code
 	c.CodeHash = hash
->>>>>>> v1.16.8
 }
