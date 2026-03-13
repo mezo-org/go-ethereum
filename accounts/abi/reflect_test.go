@@ -172,7 +172,6 @@ var reflectTests = []reflectTest{
 func TestReflectNameToStruct(t *testing.T) {
 	t.Parallel()
 	for _, test := range reflectTests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			m, err := mapArgNamesToStructFields(test.args, reflect.ValueOf(test.struc))
@@ -205,12 +204,12 @@ func TestConvertType(t *testing.T) {
 	var fields []reflect.StructField
 	fields = append(fields, reflect.StructField{
 		Name: "X",
-		Type: reflect.TypeOf(new(big.Int)),
+		Type: reflect.TypeFor[*big.Int](),
 		Tag:  "json:\"" + "x" + "\"",
 	})
 	fields = append(fields, reflect.StructField{
 		Name: "Y",
-		Type: reflect.TypeOf(new(big.Int)),
+		Type: reflect.TypeFor[*big.Int](),
 		Tag:  "json:\"" + "y" + "\"",
 	})
 	val := reflect.New(reflect.StructOf(fields))

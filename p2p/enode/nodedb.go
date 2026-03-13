@@ -434,7 +434,7 @@ func (db *DB) localSeq(id ID) uint64 {
 	if seq := db.fetchUint64(localItemKey(id, dbLocalSeq)); seq > 0 {
 		return seq
 	}
-	return nowMilliseconds()
+	return uint64(time.Now().UnixMilli())
 }
 
 // storeLocalSeq stores the local record sequence counter.
@@ -496,6 +496,10 @@ func nextNode(it iterator.Iterator) *Node {
 
 // Close flushes and closes the database files.
 func (db *DB) Close() {
-	close(db.quit)
+	select {
+	case <-db.quit: // already closed
+	default:
+		close(db.quit)
+	}
 	db.lvl.Close()
 }
