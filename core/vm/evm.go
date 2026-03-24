@@ -210,9 +210,11 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 	}
 	evm.Context.Transfer(evm.StateDB, caller.Address(), addr, value)
 
-	// It is allowed to call precompiles, even via call -- as opposed to callcode, staticcall and delegatecall it can also modify state
 	if isPrecompile {
-		ret, gas, err = evm.RunPrecompiledContract(p, caller, input, gas, value, false)
+		// When executing a precompile, use the EVM interpreter's current
+		// read-only flag. A CALL into a precompile may originate from a STATICCALL
+		// execution, and the original read-only state must be propagated correctly.
+		ret, gas, err = evm.RunPrecompiledContract(p, caller, input, gas, value, evm.interpreter.readOnly)
 	} else {
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		// The contract is a scoped environment for this execution context only.
