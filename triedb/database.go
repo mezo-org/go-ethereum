@@ -24,7 +24,6 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/trie/trienode"
-	"github.com/ethereum/go-ethereum/trie/triestate"
 	"github.com/ethereum/go-ethereum/triedb/database"
 	"github.com/ethereum/go-ethereum/triedb/hashdb"
 	"github.com/ethereum/go-ethereum/triedb/pathdb"
@@ -57,9 +56,13 @@ var VerkleDefaults = &Config{
 // backend defines the methods needed to access/update trie nodes in different
 // state scheme.
 type backend interface {
-	// Initialized returns an indicator if the state data is already initialized
-	// according to the state scheme.
-	Initialized(genesisRoot common.Hash) bool
+	// NodeReader returns a reader for accessing trie nodes within the specified state.
+	// An error will be returned if the specified state is not available.
+	NodeReader(root common.Hash) (database.NodeReader, error)
+
+	// StateReader returns a reader for accessing flat states within the specified
+	// state. An error will be returned if the specified state is not available.
+	StateReader(root common.Hash) (database.StateReader, error)
 
 	// Size returns the current storage size of the diff layers on top of the
 	// disk layer and the storage size of the nodes cached in the disk layer.
@@ -68,30 +71,19 @@ type backend interface {
 	// and dirty disk layer nodes, so both are merged into the second return.
 	Size() (common.StorageSize, common.StorageSize)
 
-	// Update performs a state transition by committing dirty nodes contained
-	// in the given set in order to update state from the specified parent to
-	// the specified root.
-	//
-	// The passed in maps(nodes, states) will be retained to avoid copying
-	// everything. Therefore, these maps must not be changed afterwards.
-	Update(root common.Hash, parent common.Hash, block uint64, nodes *trienode.MergedNodeSet, states *triestate.Set) error
-
 	// Commit writes all relevant trie nodes belonging to the specified state
 	// to disk. Report specifies whether logs will be displayed in info level.
 	Commit(root common.Hash, report bool) error
 
 	// Close closes the trie database backend and releases all held resources.
 	Close() error
-
-	// Reader returns a reader for accessing all trie nodes with provided state
-	// root. An error will be returned if the requested state is not available.
-	Reader(root common.Hash) (database.Reader, error)
 }
 
 // Database is the wrapper of the underlying backend which is shared by different
 // types of node backend as an entrypoint. It's responsible for all interactions
 // relevant with trie nodes and node preimages.
 type Database struct {
+	disk      ethdb.Database
 	config    *Config        // Configuration for trie database
 	preimages *preimageStore // The store for caching preimages
 	backend   backend        // The backend for managing trie nodes
@@ -109,6 +101,7 @@ func NewDatabase(diskdb ethdb.Database, config *Config) *Database {
 		preimages = newPreimageStore(diskdb)
 	}
 	db := &Database{
+		disk:      diskdb,
 		config:    config,
 		preimages: preimages,
 	}
@@ -123,10 +116,26 @@ func NewDatabase(diskdb ethdb.Database, config *Config) *Database {
 	return db
 }
 
-// Reader returns a reader for accessing all trie nodes with provided state root.
-// An error will be returned if the requested state is not available.
-func (db *Database) Reader(blockRoot common.Hash) (database.Reader, error) {
-	return db.backend.Reader(blockRoot)
+// NodeReader returns a reader for accessing trie nodes within the specified state.
+// An error will be returned if the specified state is not available.
+func (db *Database) NodeReader(blockRoot common.Hash) (database.NodeReader, error) {
+	return db.backend.NodeReader(blockRoot)
+}
+
+// StateReader returns a reader that allows access to the state data associated
+// with the specified state. An error will be returned if the specified state is
+// not available.
+func (db *Database) StateReader(blockRoot common.Hash) (database.StateReader, error) {
+	return db.backend.StateReader(blockRoot)
+}
+
+// HistoricReader constructs a reader for accessing the requested historic state.
+func (db *Database) HistoricReader(root common.Hash) (*pathdb.HistoricalStateReader, error) {
+	pdb, ok := db.backend.(*pathdb.Database)
+	if !ok {
+		return nil, errors.New("not supported")
+	}
+	return pdb.HistoricReader(root)
 }
 
 // Update performs a state transition by committing dirty nodes contained in the
@@ -136,11 +145,17 @@ func (db *Database) Reader(blockRoot common.Hash) (database.Reader, error) {
 //
 // The passed in maps(nodes, states) will be retained to avoid copying everything.
 // Therefore, these maps must not be changed afterwards.
-func (db *Database) Update(root common.Hash, parent common.Hash, block uint64, nodes *trienode.MergedNodeSet, states *triestate.Set) error {
+func (db *Database) Update(root common.Hash, parent common.Hash, block uint64, nodes *trienode.MergedNodeSet, states *StateSet) error {
 	if db.preimages != nil {
 		db.preimages.commit(false)
 	}
-	return db.backend.Update(root, parent, block, nodes, states)
+	switch b := db.backend.(type) {
+	case *hashdb.Database:
+		return b.Update(root, parent, block, nodes)
+	case *pathdb.Database:
+		return b.Update(root, parent, block, nodes, states.internal())
+	}
+	return errors.New("unknown backend")
 }
 
 // Commit iterates over all the children of a particular node, writes them out
@@ -166,12 +181,6 @@ func (db *Database) Size() (common.StorageSize, common.StorageSize, common.Stora
 		preimages = db.preimages.size()
 	}
 	return diffs, nodes, preimages
-}
-
-// Initialized returns an indicator if the state data is already initialized
-// according to the state scheme.
-func (db *Database) Initialized(genesisRoot common.Hash) bool {
-	return db.backend.Initialized(genesisRoot)
 }
 
 // Scheme returns the node scheme used in the database.
@@ -211,6 +220,11 @@ func (db *Database) InsertPreimage(preimages map[common.Hash][]byte) {
 		return
 	}
 	db.preimages.insertPreimage(preimages)
+}
+
+// PreimageEnabled returns the indicator if the pre-image store is enabled.
+func (db *Database) PreimageEnabled() bool {
+	return db.preimages != nil
 }
 
 // Cap iteratively flushes old but still referenced trie nodes until the total
@@ -312,18 +326,61 @@ func (db *Database) Journal(root common.Hash) error {
 	return pdb.Journal(root)
 }
 
-// SetBufferSize sets the node buffer size to the provided value(in bytes).
-// It's only supported by path-based database and will return an error for
-// others.
-func (db *Database) SetBufferSize(size int) error {
+// VerifyState traverses the flat states specified by the given state root and
+// ensures they are matched with each other.
+func (db *Database) VerifyState(root common.Hash) error {
 	pdb, ok := db.backend.(*pathdb.Database)
 	if !ok {
 		return errors.New("not supported")
 	}
-	return pdb.SetBufferSize(size)
+	return pdb.VerifyState(root)
+}
+
+// AccountIterator creates a new account iterator for the specified root hash and
+// seeks to a starting account hash.
+func (db *Database) AccountIterator(root common.Hash, seek common.Hash) (pathdb.AccountIterator, error) {
+	pdb, ok := db.backend.(*pathdb.Database)
+	if !ok {
+		return nil, errors.New("not supported")
+	}
+	return pdb.AccountIterator(root, seek)
+}
+
+// StorageIterator creates a new storage iterator for the specified root hash and
+// account. The iterator will be move to the specific start position.
+func (db *Database) StorageIterator(root common.Hash, account common.Hash, seek common.Hash) (pathdb.StorageIterator, error) {
+	pdb, ok := db.backend.(*pathdb.Database)
+	if !ok {
+		return nil, errors.New("not supported")
+	}
+	return pdb.StorageIterator(root, account, seek)
+}
+
+// IndexProgress returns the indexing progress made so far. It provides the
+// number of states that remain unindexed.
+func (db *Database) IndexProgress() (uint64, error) {
+	pdb, ok := db.backend.(*pathdb.Database)
+	if !ok {
+		return 0, errors.New("not supported")
+	}
+	return pdb.IndexProgress()
 }
 
 // IsVerkle returns the indicator if the database is holding a verkle tree.
 func (db *Database) IsVerkle() bool {
 	return db.config.IsVerkle
+}
+
+// Disk returns the underlying disk database.
+func (db *Database) Disk() ethdb.Database {
+	return db.disk
+}
+
+// SnapshotCompleted returns the indicator if the snapshot is completed.
+func (db *Database) SnapshotCompleted() bool {
+	pdb, ok := db.backend.(*pathdb.Database)
+	if !ok {
+		return false
+	}
+	return pdb.SnapshotCompleted()
 }
