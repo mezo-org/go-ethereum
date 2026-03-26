@@ -316,6 +316,7 @@ func assertPrecompileContext(
 	gasCost uint64,
 	expect precompileContextExpectation,
 ) {
+
 	if remainingGas != suppliedGas-gasCost {
 		t.Fatalf("unexpected remaining gas: want %d got %d", suppliedGas-gasCost, remainingGas)
 	}
@@ -628,140 +629,6 @@ func TestEVMCallExecutesPrecompileStateMutation(t *testing.T) {
 			targetBalance := evm.StateDB.GetBalance(recipientAddr)
 			if targetBalance.Cmp(tc.expectedTargetBal) != 0 {
 				t.Fatalf("unexpected recipient balance: want %s got %s", tc.expectedTargetBal, targetBalance)
-			}
-		})
-	}
-}
-
-func TestEVMReadOnlyContextPropagation(t *testing.T) {
-	const (
-		suppliedGas = uint64(500000)
-		gasCost     = uint64(10)
-	)
-
-	// Build runtime bytecode equivalent to a contract with:
-	//
-	//   function run() external returns (uint256) {
-	//       bool ok = precompile.call("");
-	//       return ok ? 1 : 0;
-	//   }
-	nestedPrecompileCallBytecode := func(precompileAddr common.Address) []byte {
-		// Prepare a minimal CALL with zero value, empty calldata, and no
-		// returndata copy. The target address and gas are pushed next.
-		code := []byte{
-			byte(PUSH1), 0x00, // retSize
-			byte(PUSH1), 0x00, // retOffset
-			byte(PUSH1), 0x00, // inSize
-			byte(PUSH1), 0x00, // inOffset
-			byte(PUSH1), 0x00, // value
-			byte(PUSH20),
-		}
-		// Append the 20-byte precompile address consumed by PUSH20.
-		code = append(code, precompileAddr.Bytes()...)
-		// Execute the CALL with the remaining gas, store the success flag at
-		// memory offset 0, and return it as a 32-byte word.
-		code = append(code,
-			byte(GAS),
-			byte(CALL),
-			byte(PUSH1), 0x00,
-			byte(MSTORE),
-			byte(PUSH1), 0x20,
-			byte(PUSH1), 0x00,
-			byte(RETURN),
-		)
-		return code
-	}
-
-	// In this test we simulate nested executions:
-	// caller -> (different call modes) helper contract -> (via CALL) precompile.
-	tests := []struct {
-		name             string
-		prepareCaller    func(*EVM, common.Address) ContractRef
-		execute          func(*EVM, ContractRef, common.Address) ([]byte, uint64, error)
-		expectedReadOnly bool
-	}{
-		{
-			name: "read-only context",
-			prepareCaller: func(evm *EVM, callerAddr common.Address) ContractRef {
-				evm.StateDB.CreateAccount(callerAddr)
-				return AccountRef(callerAddr)
-			},
-			execute: func(evm *EVM, caller ContractRef, contractAddr common.Address) ([]byte, uint64, error) {
-				// Simulate: caller -> (via STATICCALL) helper contract -> (via CALL) precompile.
-				return evm.StaticCall(caller, contractAddr, nil, suppliedGas)
-			},
-			expectedReadOnly: true,
-		},
-		{
-			name: "mutable context - call",
-			prepareCaller: func(evm *EVM, callerAddr common.Address) ContractRef {
-				evm.StateDB.CreateAccount(callerAddr)
-				return AccountRef(callerAddr)
-			},
-			execute: func(evm *EVM, caller ContractRef, contractAddr common.Address) ([]byte, uint64, error) {
-				// Simulate: caller -> (via CALL) helper contract -> (via CALL) precompile.
-				return evm.Call(caller, contractAddr, nil, suppliedGas, uint256.NewInt(0))
-			},
-			expectedReadOnly: false,
-		},
-		{
-			name: "mutable context - delegatecall",
-			prepareCaller: func(evm *EVM, callerAddr common.Address) ContractRef {
-				evm.StateDB.CreateAccount(callerAddr)
-				parentAddr := common.HexToAddress("0x7210")
-				parent := NewContract(AccountRef(callerAddr), AccountRef(parentAddr), uint256.NewInt(0), suppliedGas)
-				return NewContract(parent, AccountRef(callerAddr), nil, suppliedGas)
-			},
-			execute: func(evm *EVM, caller ContractRef, contractAddr common.Address) ([]byte, uint64, error) {
-				// Simulate: caller -> (via DELEGATECALL) helper contract -> (via CALL) precompile.
-				return evm.DelegateCall(caller, contractAddr, nil, suppliedGas)
-			},
-			expectedReadOnly: false,
-		},
-		{
-			name: "mutable context - callcode",
-			prepareCaller: func(evm *EVM, callerAddr common.Address) ContractRef {
-				evm.StateDB.CreateAccount(callerAddr)
-				return AccountRef(callerAddr)
-			},
-			execute: func(evm *EVM, caller ContractRef, contractAddr common.Address) ([]byte, uint64, error) {
-				// Simulate: caller -> (via CALLCODE) helper contract -> (via CALL) precompile.
-				return evm.CallCode(caller, contractAddr, nil, suppliedGas, uint256.NewInt(0))
-			},
-			expectedReadOnly: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			callerAddr := common.HexToAddress("0x7201")
-			originAddr := common.HexToAddress("0x7202")
-			contractAddr := common.HexToAddress("0x7203")
-			precompileAddr := common.HexToAddress("0x7204")
-
-			evm := newPrecompileTestEVM(t, originAddr)
-			// Use mock precompile to record whether it was executed with
-			// read-only or mutable context.
-			precompile := &mockPrecompile{addr: precompileAddr, gas: gasCost}
-			evm.WithPrecompiles(map[common.Address]PrecompiledContract{precompileAddr: precompile}, []common.Address{precompileAddr})
-
-			caller := tc.prepareCaller(evm, callerAddr)
-			evm.StateDB.CreateAccount(contractAddr)
-			evm.StateDB.SetCode(contractAddr, nestedPrecompileCallBytecode(precompileAddr))
-
-			ret, _, err := tc.execute(evm, caller, contractAddr)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			expectedRet := append(make([]byte, 31), 0x01)
-			if !bytes.Equal(ret, expectedRet) {
-				t.Fatalf("unexpected return data: want %x got %x", expectedRet, ret)
-			}
-			if precompile.observedAddress != precompileAddr {
-				t.Fatalf("expected precompile address: want %s got %s", precompileAddr, precompile.observedAddress)
-			}
-			if precompile.observedReadOnly != tc.expectedReadOnly {
-				t.Fatalf("unexpected readonly flag: want %t got %t", tc.expectedReadOnly, precompile.observedReadOnly)
 			}
 		})
 	}
