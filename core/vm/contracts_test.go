@@ -32,6 +32,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
 )
 
@@ -58,8 +59,9 @@ var allPrecompiles = map[common.Address]PrecompiledContract{
 	common.BytesToAddress([]byte{2}):    &sha256hash{},
 	common.BytesToAddress([]byte{3}):    &ripemd160hash{},
 	common.BytesToAddress([]byte{4}):    &dataCopy{},
-	common.BytesToAddress([]byte{5}):    &bigModExp{eip2565: false},
-	common.BytesToAddress([]byte{0xf5}): &bigModExp{eip2565: true},
+	common.BytesToAddress([]byte{5}):    &bigModExp{eip2565: false, eip7883: false},
+	common.BytesToAddress([]byte{0xf5}): &bigModExp{eip2565: true, eip7883: false},
+	common.BytesToAddress([]byte{0xf6}): &bigModExp{eip2565: true, eip7883: true},
 	common.BytesToAddress([]byte{6}):    &bn256AddIstanbul{},
 	common.BytesToAddress([]byte{7}):    &bn256ScalarMulIstanbul{},
 	common.BytesToAddress([]byte{8}):    &bn256PairingIstanbul{},
@@ -67,14 +69,14 @@ var allPrecompiles = map[common.Address]PrecompiledContract{
 	common.BytesToAddress([]byte{0x0a}): &kzgPointEvaluation{},
 
 	common.BytesToAddress([]byte{0x0f, 0x0a}): &bls12381G1Add{},
-	common.BytesToAddress([]byte{0x0f, 0x0b}): &bls12381G1Mul{},
-	common.BytesToAddress([]byte{0x0f, 0x0c}): &bls12381G1MultiExp{},
-	common.BytesToAddress([]byte{0x0f, 0x0d}): &bls12381G2Add{},
-	common.BytesToAddress([]byte{0x0f, 0x0e}): &bls12381G2Mul{},
-	common.BytesToAddress([]byte{0x0f, 0x0f}): &bls12381G2MultiExp{},
-	common.BytesToAddress([]byte{0x0f, 0x10}): &bls12381Pairing{},
-	common.BytesToAddress([]byte{0x0f, 0x11}): &bls12381MapG1{},
-	common.BytesToAddress([]byte{0x0f, 0x12}): &bls12381MapG2{},
+	common.BytesToAddress([]byte{0x0f, 0x0b}): &bls12381G1MultiExp{},
+	common.BytesToAddress([]byte{0x0f, 0x0c}): &bls12381G2Add{},
+	common.BytesToAddress([]byte{0x0f, 0x0d}): &bls12381G2MultiExp{},
+	common.BytesToAddress([]byte{0x0f, 0x0e}): &bls12381Pairing{},
+	common.BytesToAddress([]byte{0x0f, 0x0f}): &bls12381MapG1{},
+	common.BytesToAddress([]byte{0x0f, 0x10}): &bls12381MapG2{},
+
+	common.BytesToAddress([]byte{0x0b}): &p256Verify{},
 }
 
 // EIP-152 test vectors
@@ -106,7 +108,7 @@ func testPrecompiled(addr string, test precompiledTest, t *testing.T) {
 	in := common.Hex2Bytes(test.Input)
 	gas := p.RequiredGas(in)
 	t.Run(fmt.Sprintf("%s-Gas=%d", test.Name, gas), func(t *testing.T) {
-		if res, _, err := runPrecompiledContract(&EVM{}, p, AccountRef(common.Address{}), in, gas, new(uint256.Int), false); err != nil {
+		if res, _, err := runPrecompiledContract(&EVM{}, p, common.Address{}, in, gas, new(uint256.Int), false); err != nil {
 			t.Error(err)
 		} else if common.Bytes2Hex(res) != test.Expected {
 			t.Errorf("Expected %v, got %v", test.Expected, common.Bytes2Hex(res))
@@ -125,10 +127,10 @@ func testPrecompiled(addr string, test precompiledTest, t *testing.T) {
 func testPrecompiledOOG(addr string, test precompiledTest, t *testing.T) {
 	p := allPrecompiles[common.HexToAddress(addr)]
 	in := common.Hex2Bytes(test.Input)
-	gas := p.RequiredGas(in) - 1
+	gas := test.Gas - 1
 
 	t.Run(fmt.Sprintf("%s-Gas=%d", test.Name, gas), func(t *testing.T) {
-		_, _, err := runPrecompiledContract(&EVM{}, p, AccountRef(common.Address{}), in, gas, new(uint256.Int), false)
+		_, _, err := runPrecompiledContract(&EVM{}, p, common.Address{}, in, gas, new(uint256.Int), false)
 		if err.Error() != "out of gas" {
 			t.Errorf("Expected error [out of gas], got [%v]", err)
 		}
@@ -145,7 +147,7 @@ func testPrecompiledFailure(addr string, test precompiledFailureTest, t *testing
 	in := common.Hex2Bytes(test.Input)
 	gas := p.RequiredGas(in)
 	t.Run(test.Name, func(t *testing.T) {
-		_, _, err := runPrecompiledContract(&EVM{}, p, AccountRef(common.Address{}), in, gas, new(uint256.Int), false)
+		_, _, err := runPrecompiledContract(&EVM{}, p, common.Address{}, in, gas, new(uint256.Int), false)
 		if err.Error() != test.ExpectedError {
 			t.Errorf("Expected error [%v], got [%v]", test.ExpectedError, err)
 		}
@@ -174,12 +176,10 @@ func benchmarkPrecompiled(addr string, test precompiledTest, bench *testing.B) {
 	bench.Run(fmt.Sprintf("%s-Gas=%d", test.Name, reqGas), func(bench *testing.B) {
 		bench.ReportAllocs()
 		start := time.Now()
-		bench.ResetTimer()
-		for i := 0; i < bench.N; i++ {
+		for bench.Loop() {
 			copy(data, in)
-			res, _, err = runPrecompiledContract(&EVM{}, p, AccountRef(common.Address{}), in, reqGas, new(uint256.Int), false)
+			res, _, err = runPrecompiledContract(&EVM{}, p, common.Address{}, in, reqGas, new(uint256.Int), false)
 		}
-		bench.StopTimer()
 		elapsed := uint64(time.Since(start))
 		if elapsed < 1 {
 			elapsed = 1
@@ -237,6 +237,10 @@ func (p *mockPrecompile) Run(evm *EVM, contract *Contract, readonly bool) ([]byt
 	return []byte{0xaa}, nil
 }
 
+func (p *mockPrecompile) Name() string {
+	return "MOCK"
+}
+
 type precompileContextExpectation struct {
 	caller      common.Address
 	origin      common.Address
@@ -281,12 +285,13 @@ func assertExpectedError(t *testing.T, err error, expectedErr error) {
 }
 
 func newPrecompileTestEVM(t *testing.T, origin common.Address) *EVM {
-	statedb, err := state.New(types.EmptyRootHash, state.NewDatabase(rawdb.NewMemoryDatabase()), nil)
+	db := state.NewDatabase(triedb.NewDatabase(rawdb.NewMemoryDatabase(), nil), nil)
+	statedb, err := state.New(types.EmptyRootHash, db)
 	if err != nil {
 		t.Fatalf("failed to create state db: %v", err)
 	}
 
-	return NewEVM(BlockContext{
+	evm := NewEVM(BlockContext{
 		CanTransfer: func(db StateDB, addr common.Address, amount *uint256.Int) bool {
 			return db.GetBalance(addr).Cmp(amount) >= 0
 		},
@@ -298,7 +303,90 @@ func newPrecompileTestEVM(t *testing.T, origin common.Address) *EVM {
 			db.AddBalance(to, amount, tracing.BalanceChangeTransfer)
 		},
 		BlockNumber: new(big.Int),
-	}, TxContext{Origin: origin}, statedb, params.AllEthashProtocolChanges, Config{})
+	}, statedb, params.AllEthashProtocolChanges, Config{})
+	evm.SetTxContext(TxContext{Origin: origin})
+	return evm
+}
+
+func TestEVMWithCustomPrecompilesClonesDefaultsBeforeOverlay(t *testing.T) {
+	originAddr := common.HexToAddress("0x1234")
+	customAddr := common.HexToAddress("0x9999")
+	customPrecompile := &mockPrecompile{addr: customAddr, gas: 1}
+
+	evm := newPrecompileTestEVM(t, originAddr)
+	evm.WithCustomPrecompiles(map[common.Address]PrecompiledContract{
+		customAddr: customPrecompile,
+	})
+
+	got, ok := evm.Precompiles()[customAddr]
+	switch {
+	case !ok:
+		t.Fatalf("expected custom precompile %s to be registered", customAddr)
+	case got != customPrecompile:
+		t.Fatalf("unexpected precompile registered for %s", customAddr)
+	}
+
+	freshEVM := newPrecompileTestEVM(t, originAddr)
+	_, ok = freshEVM.Precompiles()[customAddr]
+	switch ok {
+	case true:
+		t.Fatalf("unexpected custom precompile %s leaked into default precompile set", customAddr)
+	}
+}
+
+func TestEVMWithCustomPrecompilesPanicsOnCollision(t *testing.T) {
+	originAddr := common.HexToAddress("0x1234")
+	collisionAddr := common.BytesToAddress([]byte{0x1})
+	expected := fmt.Sprintf("custom precompile %s shadows an existing precompile", collisionAddr)
+
+	evm := newPrecompileTestEVM(t, originAddr)
+
+	defer func() {
+		switch recovered := recover().(type) {
+		case nil:
+			t.Fatal("expected panic on custom precompile collision")
+		case string:
+			switch recovered {
+			case expected:
+			default:
+				t.Fatalf("unexpected panic: want %q got %q", expected, recovered)
+			}
+		default:
+			t.Fatalf("unexpected panic type: %T", recovered)
+		}
+	}()
+
+	evm.WithCustomPrecompiles(map[common.Address]PrecompiledContract{
+		collisionAddr: &mockPrecompile{addr: collisionAddr, gas: 1},
+	})
+}
+
+func TestEVMWithCustomPrecompilesPanicsOnMismatchedAddress(t *testing.T) {
+	originAddr := common.HexToAddress("0x1234")
+	keyAddr := common.HexToAddress("0x9999")
+	reportedAddr := common.HexToAddress("0x9998")
+	expected := fmt.Sprintf("custom precompile %s reports mismatched address %s", keyAddr, reportedAddr)
+
+	evm := newPrecompileTestEVM(t, originAddr)
+
+	defer func() {
+		switch recovered := recover().(type) {
+		case nil:
+			t.Fatal("expected panic on custom precompile address mismatch")
+		case string:
+			switch recovered {
+			case expected:
+			default:
+				t.Fatalf("unexpected panic: want %q got %q", expected, recovered)
+			}
+		default:
+			t.Fatalf("unexpected panic type: %T", recovered)
+		}
+	}()
+
+	evm.WithCustomPrecompiles(map[common.Address]PrecompiledContract{
+		keyAddr: &mockPrecompile{addr: reportedAddr, gas: 1},
+	})
 }
 
 func addBalance(evm *EVM, addr common.Address, amount *uint256.Int) {
@@ -361,17 +449,17 @@ func TestEVMExecutePrecompileWithExpectedCallContexts(t *testing.T) {
 
 	testCases := []struct {
 		name              string
-		prepareCaller     func(*EVM) ContractRef
-		executePrecompile func(*EVM, *mockPrecompile, ContractRef) ([]byte, uint64, error)
+		prepareCaller     func(*EVM) common.Address
+		executePrecompile func(*EVM, *mockPrecompile, common.Address) ([]byte, uint64, error)
 		expect            precompileContextExpectation
 	}{
 		{
 			name: "call",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				addBalance(evm, callerAddr, uint256.NewInt(1000))
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, precompile *mockPrecompile, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, precompile *mockPrecompile, caller common.Address) ([]byte, uint64, error) {
 				return evm.Call(caller, precompileAddr, calldata, suppliedGas, uint256.NewInt(13))
 			},
 			expect: precompileContextExpectation{
@@ -383,11 +471,11 @@ func TestEVMExecutePrecompileWithExpectedCallContexts(t *testing.T) {
 		},
 		{
 			name: "staticcall",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				evm.StateDB.CreateAccount(callerAddr)
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, precompile *mockPrecompile, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, precompile *mockPrecompile, caller common.Address) ([]byte, uint64, error) {
 				return evm.StaticCall(caller, precompileAddr, calldata, suppliedGas)
 			},
 			expect: precompileContextExpectation{
@@ -399,18 +487,12 @@ func TestEVMExecutePrecompileWithExpectedCallContexts(t *testing.T) {
 		},
 		{
 			name: "delegatecall",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				evm.StateDB.CreateAccount(delegateCallerAddr)
-				// Build a parent frame to simulate a delegatecall setup.
-				// In regular contract DELEGATECALL, caller context is derived
-				// from the parent frame. For precompiles, the implementation behaves
-				// like CALL for caller identity: the direct caller (delegateCallerAddr)
-				// is observed by the precompile, not the parent frame.
-				parent := NewContract(AccountRef(callerAddr), AccountRef(delegateParentAddr), uint256.NewInt(17), suppliedGas)
-				return NewContract(parent, AccountRef(delegateCallerAddr), nil, suppliedGas)
+				return delegateCallerAddr
 			},
-			executePrecompile: func(evm *EVM, precompile *mockPrecompile, caller ContractRef) ([]byte, uint64, error) {
-				return evm.DelegateCall(caller, precompileAddr, calldata, suppliedGas)
+			executePrecompile: func(evm *EVM, precompile *mockPrecompile, caller common.Address) ([]byte, uint64, error) {
+				return evm.DelegateCall(delegateParentAddr, caller, precompileAddr, calldata, suppliedGas, nil)
 			},
 			// DELEGATECALL to a precompile is read-only. It keeps the direct caller
 			// which in this test is the caller passed to `evm.DelegateCall`
@@ -426,11 +508,11 @@ func TestEVMExecutePrecompileWithExpectedCallContexts(t *testing.T) {
 		},
 		{
 			name: "callcode",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				addBalance(evm, callerAddr, uint256.NewInt(1000))
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, precompile *mockPrecompile, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, precompile *mockPrecompile, caller common.Address) ([]byte, uint64, error) {
 				return evm.CallCode(caller, precompileAddr, calldata, suppliedGas, uint256.NewInt(19))
 			},
 			// CALLCODE to a precompile is always read-only, unlike CALLCODE to
@@ -444,10 +526,10 @@ func TestEVMExecutePrecompileWithExpectedCallContexts(t *testing.T) {
 		},
 		{
 			name: "runPrecompiledContract",
-			prepareCaller: func(evm *EVM) ContractRef {
-				return AccountRef(callerAddr)
+			prepareCaller: func(evm *EVM) common.Address {
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, precompile *mockPrecompile, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, precompile *mockPrecompile, caller common.Address) ([]byte, uint64, error) {
 				// Execute the precompile via the low-level helper.
 				return runPrecompiledContract(evm, precompile, caller, calldata, suppliedGas, uint256.NewInt(42), true)
 			},
@@ -464,7 +546,7 @@ func TestEVMExecutePrecompileWithExpectedCallContexts(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			evm := newPrecompileTestEVM(t, originAddr)
 			precompile := &mockPrecompile{addr: precompileAddr, gas: gasCost}
-			evm.WithPrecompiles(map[common.Address]PrecompiledContract{precompileAddr: precompile}, []common.Address{precompileAddr})
+			evm.WithCustomPrecompiles(map[common.Address]PrecompiledContract{precompileAddr: precompile})
 
 			caller := tc.prepareCaller(evm)
 			ret, remainingGas, err := tc.executePrecompile(evm, precompile, caller)
@@ -505,6 +587,10 @@ func (p *balanceMutatingMockPrecompile) Run(evm *EVM, contract *Contract, readon
 	return []byte{0xaa}, nil
 }
 
+func (p *balanceMutatingMockPrecompile) Name() string {
+	return "BALANCE_MUTATING_MOCK"
+}
+
 func TestEVMCallExecutesPrecompileStateMutation(t *testing.T) {
 	const (
 		suppliedGas = uint64(100)
@@ -523,8 +609,8 @@ func TestEVMCallExecutesPrecompileStateMutation(t *testing.T) {
 	transferAmount := uint256.NewInt(7)
 	testCases := []struct {
 		name              string
-		prepareCaller     func(*EVM) ContractRef
-		executePrecompile func(*EVM, ContractRef) ([]byte, uint64, error)
+		prepareCaller     func(*EVM) common.Address
+		executePrecompile func(*EVM, common.Address) ([]byte, uint64, error)
 		expectedErr       error
 		expectedRet       []byte
 		expectedGas       uint64
@@ -533,12 +619,12 @@ func TestEVMCallExecutesPrecompileStateMutation(t *testing.T) {
 	}{
 		{
 			name: "call",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				addBalance(evm, callerAddr, initialCallerBalance)
 				addBalance(evm, recipientAddr, uint256.NewInt(0))
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
 				return evm.Call(caller, precompileAddr, calldata, suppliedGas, uint256.NewInt(0))
 			},
 			expectedRet:       []byte{0xaa},
@@ -548,12 +634,12 @@ func TestEVMCallExecutesPrecompileStateMutation(t *testing.T) {
 		},
 		{
 			name: "staticcall",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				addBalance(evm, callerAddr, initialCallerBalance)
 				addBalance(evm, recipientAddr, uint256.NewInt(0))
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
 				return evm.StaticCall(caller, precompileAddr, calldata, suppliedGas)
 			},
 			expectedErr:       errors.New("cannot run in read-only mode"),
@@ -564,15 +650,14 @@ func TestEVMCallExecutesPrecompileStateMutation(t *testing.T) {
 		},
 		{
 			name: "delegatecall",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				addBalance(evm, callerAddr, initialCallerBalance)
 				addBalance(evm, recipientAddr, uint256.NewInt(0))
 				evm.StateDB.CreateAccount(delegateCallerAddr)
-				parent := NewContract(AccountRef(callerAddr), AccountRef(delegateParentAddr), uint256.NewInt(0), suppliedGas)
-				return NewContract(parent, AccountRef(delegateCallerAddr), nil, suppliedGas)
+				return delegateCallerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
-				return evm.DelegateCall(caller, precompileAddr, calldata, suppliedGas)
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
+				return evm.DelegateCall(delegateParentAddr, caller, precompileAddr, calldata, suppliedGas, nil)
 			},
 			expectedErr:       errors.New("cannot run in read-only mode"),
 			expectedRet:       nil,
@@ -582,12 +667,12 @@ func TestEVMCallExecutesPrecompileStateMutation(t *testing.T) {
 		},
 		{
 			name: "callcode",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				addBalance(evm, callerAddr, initialCallerBalance)
 				addBalance(evm, recipientAddr, uint256.NewInt(0))
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
 				return evm.CallCode(caller, precompileAddr, calldata, suppliedGas, uint256.NewInt(0))
 			},
 			expectedErr:       errors.New("cannot run in read-only mode"),
@@ -608,7 +693,7 @@ func TestEVMCallExecutesPrecompileStateMutation(t *testing.T) {
 				to:     recipientAddr,
 				amount: transferAmount,
 			}
-			evm.WithPrecompiles(map[common.Address]PrecompiledContract{precompileAddr: precompile}, []common.Address{precompileAddr})
+			evm.WithCustomPrecompiles(map[common.Address]PrecompiledContract{precompileAddr: precompile})
 
 			caller := tc.prepareCaller(evm)
 			ret, remainingGas, err := tc.executePrecompile(evm, caller)
@@ -676,17 +761,17 @@ func TestEVMReadOnlyContextPropagation(t *testing.T) {
 	// caller -> (different call modes) helper contract -> (via CALL) precompile.
 	tests := []struct {
 		name             string
-		prepareCaller    func(*EVM, common.Address) ContractRef
-		execute          func(*EVM, ContractRef, common.Address) ([]byte, uint64, error)
+		prepareCaller    func(*EVM, common.Address) common.Address
+		execute          func(*EVM, common.Address, common.Address) ([]byte, uint64, error)
 		expectedReadOnly bool
 	}{
 		{
 			name: "read-only context",
-			prepareCaller: func(evm *EVM, callerAddr common.Address) ContractRef {
+			prepareCaller: func(evm *EVM, callerAddr common.Address) common.Address {
 				evm.StateDB.CreateAccount(callerAddr)
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			execute: func(evm *EVM, caller ContractRef, contractAddr common.Address) ([]byte, uint64, error) {
+			execute: func(evm *EVM, caller common.Address, contractAddr common.Address) ([]byte, uint64, error) {
 				// Simulate: caller -> (via STATICCALL) helper contract -> (via CALL) precompile.
 				return evm.StaticCall(caller, contractAddr, nil, suppliedGas)
 			},
@@ -694,11 +779,11 @@ func TestEVMReadOnlyContextPropagation(t *testing.T) {
 		},
 		{
 			name: "mutable context - call",
-			prepareCaller: func(evm *EVM, callerAddr common.Address) ContractRef {
+			prepareCaller: func(evm *EVM, callerAddr common.Address) common.Address {
 				evm.StateDB.CreateAccount(callerAddr)
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			execute: func(evm *EVM, caller ContractRef, contractAddr common.Address) ([]byte, uint64, error) {
+			execute: func(evm *EVM, caller common.Address, contractAddr common.Address) ([]byte, uint64, error) {
 				// Simulate: caller -> (via CALL) helper contract -> (via CALL) precompile.
 				return evm.Call(caller, contractAddr, nil, suppliedGas, uint256.NewInt(0))
 			},
@@ -706,25 +791,23 @@ func TestEVMReadOnlyContextPropagation(t *testing.T) {
 		},
 		{
 			name: "mutable context - delegatecall",
-			prepareCaller: func(evm *EVM, callerAddr common.Address) ContractRef {
+			prepareCaller: func(evm *EVM, callerAddr common.Address) common.Address {
 				evm.StateDB.CreateAccount(callerAddr)
-				parentAddr := common.HexToAddress("0x7210")
-				parent := NewContract(AccountRef(callerAddr), AccountRef(parentAddr), uint256.NewInt(0), suppliedGas)
-				return NewContract(parent, AccountRef(callerAddr), nil, suppliedGas)
+				return callerAddr
 			},
-			execute: func(evm *EVM, caller ContractRef, contractAddr common.Address) ([]byte, uint64, error) {
+			execute: func(evm *EVM, caller common.Address, contractAddr common.Address) ([]byte, uint64, error) {
 				// Simulate: caller -> (via DELEGATECALL) helper contract -> (via CALL) precompile.
-				return evm.DelegateCall(caller, contractAddr, nil, suppliedGas)
+				return evm.DelegateCall(caller, caller, contractAddr, nil, suppliedGas, nil)
 			},
 			expectedReadOnly: false,
 		},
 		{
 			name: "mutable context - callcode",
-			prepareCaller: func(evm *EVM, callerAddr common.Address) ContractRef {
+			prepareCaller: func(evm *EVM, callerAddr common.Address) common.Address {
 				evm.StateDB.CreateAccount(callerAddr)
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			execute: func(evm *EVM, caller ContractRef, contractAddr common.Address) ([]byte, uint64, error) {
+			execute: func(evm *EVM, caller common.Address, contractAddr common.Address) ([]byte, uint64, error) {
 				// Simulate: caller -> (via CALLCODE) helper contract -> (via CALL) precompile.
 				return evm.CallCode(caller, contractAddr, nil, suppliedGas, uint256.NewInt(0))
 			},
@@ -743,11 +826,11 @@ func TestEVMReadOnlyContextPropagation(t *testing.T) {
 			// Use mock precompile to record whether it was executed with
 			// read-only or mutable context.
 			precompile := &mockPrecompile{addr: precompileAddr, gas: gasCost}
-			evm.WithPrecompiles(map[common.Address]PrecompiledContract{precompileAddr: precompile}, []common.Address{precompileAddr})
+			evm.WithCustomPrecompiles(map[common.Address]PrecompiledContract{precompileAddr: precompile})
 
 			caller := tc.prepareCaller(evm, callerAddr)
 			evm.StateDB.CreateAccount(contractAddr)
-			evm.StateDB.SetCode(contractAddr, nestedPrecompileCallBytecode(precompileAddr))
+			evm.StateDB.SetCode(contractAddr, nestedPrecompileCallBytecode(precompileAddr), tracing.CodeChangeUnspecified)
 
 			ret, _, err := tc.execute(evm, caller, contractAddr)
 			if err != nil {
@@ -795,6 +878,10 @@ func (p *balanceMutatingErrorMockPrecompile) Run(evm *EVM, contract *Contract, r
 	return nil, errBalanceMutatingMockPrecompile
 }
 
+func (p *balanceMutatingErrorMockPrecompile) Name() string {
+	return "BALANCE_MUTATING_ERROR_MOCK"
+}
+
 func TestEVMCallRevertsPrecompileStateMutationOnError(t *testing.T) {
 	const (
 		suppliedGas = uint64(100)
@@ -814,19 +901,19 @@ func TestEVMCallRevertsPrecompileStateMutationOnError(t *testing.T) {
 
 	testCases := []struct {
 		name              string
-		prepareCaller     func(*EVM) ContractRef
-		executePrecompile func(*EVM, ContractRef) ([]byte, uint64, error)
+		prepareCaller     func(*EVM) common.Address
+		executePrecompile func(*EVM, common.Address) ([]byte, uint64, error)
 		expectedErr       error
 		expectedGas       uint64
 	}{
 		{
 			name: "call",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				addBalance(evm, callerAddr, initialCallerBalance)
 				addBalance(evm, recipientAddr, uint256.NewInt(0))
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
 				return evm.Call(caller, precompileAddr, calldata, suppliedGas, uint256.NewInt(0))
 			},
 			expectedErr: errBalanceMutatingMockPrecompile,
@@ -834,12 +921,12 @@ func TestEVMCallRevertsPrecompileStateMutationOnError(t *testing.T) {
 		},
 		{
 			name: "staticcall",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				addBalance(evm, callerAddr, initialCallerBalance)
 				addBalance(evm, recipientAddr, uint256.NewInt(0))
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
 				return evm.StaticCall(caller, precompileAddr, calldata, suppliedGas)
 			},
 			expectedErr: errBalanceMutatingMockPrecompile,
@@ -847,27 +934,26 @@ func TestEVMCallRevertsPrecompileStateMutationOnError(t *testing.T) {
 		},
 		{
 			name: "delegatecall",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				addBalance(evm, callerAddr, initialCallerBalance)
 				addBalance(evm, recipientAddr, uint256.NewInt(0))
 				evm.StateDB.CreateAccount(delegateCallerAddr)
-				parent := NewContract(AccountRef(callerAddr), AccountRef(delegateParentAddr), uint256.NewInt(0), suppliedGas)
-				return NewContract(parent, AccountRef(delegateCallerAddr), nil, suppliedGas)
+				return delegateCallerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
-				return evm.DelegateCall(caller, precompileAddr, calldata, suppliedGas)
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
+				return evm.DelegateCall(delegateParentAddr, caller, precompileAddr, calldata, suppliedGas, nil)
 			},
 			expectedErr: errBalanceMutatingMockPrecompile,
 			expectedGas: 0,
 		},
 		{
 			name: "callcode",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				addBalance(evm, callerAddr, initialCallerBalance)
 				addBalance(evm, recipientAddr, uint256.NewInt(0))
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
 				return evm.CallCode(caller, precompileAddr, calldata, suppliedGas, uint256.NewInt(0))
 			},
 			expectedErr: errBalanceMutatingMockPrecompile,
@@ -885,7 +971,7 @@ func TestEVMCallRevertsPrecompileStateMutationOnError(t *testing.T) {
 				to:     recipientAddr,
 				amount: transferAmount,
 			}
-			evm.WithPrecompiles(map[common.Address]PrecompiledContract{precompileAddr: precompile}, []common.Address{precompileAddr})
+			evm.WithCustomPrecompiles(map[common.Address]PrecompiledContract{precompileAddr: precompile})
 
 			caller := tc.prepareCaller(evm)
 			_, remainingGas, err := tc.executePrecompile(evm, caller)
@@ -930,6 +1016,10 @@ func (p *runTrackingMockPrecompile) Run(evm *EVM, contract *Contract, readonly b
 	return []byte{0xaa}, nil
 }
 
+func (p *runTrackingMockPrecompile) Name() string {
+	return "RUN_TRACKING_MOCK"
+}
+
 func TestEVMPrecompileOutOfGas(t *testing.T) {
 	const (
 		// use more gas than supplied
@@ -949,18 +1039,18 @@ func TestEVMPrecompileOutOfGas(t *testing.T) {
 		name              string
 		callerAddr        common.Address
 		callerBalance     *uint256.Int
-		prepareCaller     func(*EVM) ContractRef
-		executePrecompile func(*EVM, ContractRef) ([]byte, uint64, error)
+		prepareCaller     func(*EVM) common.Address
+		executePrecompile func(*EVM, common.Address) ([]byte, uint64, error)
 	}{
 		{
 			name:          "call",
 			callerAddr:    callerAddr,
 			callerBalance: uint256.NewInt(100),
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				addBalance(evm, callerAddr, uint256.NewInt(100))
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
 				return evm.Call(caller, precompileAddr, calldata, suppliedGas, uint256.NewInt(0))
 			},
 		},
@@ -968,11 +1058,11 @@ func TestEVMPrecompileOutOfGas(t *testing.T) {
 			name:          "staticcall",
 			callerAddr:    callerAddr,
 			callerBalance: uint256.NewInt(0),
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				evm.StateDB.CreateAccount(callerAddr)
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
 				return evm.StaticCall(caller, precompileAddr, calldata, suppliedGas)
 			},
 		},
@@ -980,24 +1070,23 @@ func TestEVMPrecompileOutOfGas(t *testing.T) {
 			name:          "delegatecall",
 			callerAddr:    delegateCallerAddr,
 			callerBalance: uint256.NewInt(0),
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				evm.StateDB.CreateAccount(delegateCallerAddr)
-				parent := NewContract(AccountRef(callerAddr), AccountRef(delegateParentAddr), uint256.NewInt(0), suppliedGas)
-				return NewContract(parent, AccountRef(delegateCallerAddr), nil, suppliedGas)
+				return delegateCallerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
-				return evm.DelegateCall(caller, precompileAddr, calldata, suppliedGas)
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
+				return evm.DelegateCall(delegateParentAddr, caller, precompileAddr, calldata, suppliedGas, nil)
 			},
 		},
 		{
 			name:          "callcode",
 			callerAddr:    callerAddr,
 			callerBalance: uint256.NewInt(100),
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				addBalance(evm, callerAddr, uint256.NewInt(100))
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
 				return evm.CallCode(caller, precompileAddr, calldata, suppliedGas, uint256.NewInt(0))
 			},
 		},
@@ -1007,7 +1096,7 @@ func TestEVMPrecompileOutOfGas(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			evm := newPrecompileTestEVM(t, originAddr)
 			precompile := &runTrackingMockPrecompile{addr: precompileAddr, gas: gasCost}
-			evm.WithPrecompiles(map[common.Address]PrecompiledContract{precompileAddr: precompile}, []common.Address{precompileAddr})
+			evm.WithCustomPrecompiles(map[common.Address]PrecompiledContract{precompileAddr: precompile})
 
 			caller := tc.prepareCaller(evm)
 			_, remainingGas, err := tc.executePrecompile(evm, caller)
@@ -1050,8 +1139,8 @@ func TestEVMPrecompileInsufficientBalance(t *testing.T) {
 
 	testCases := []struct {
 		name              string
-		prepareCaller     func(*EVM) ContractRef
-		executePrecompile func(*EVM, ContractRef) ([]byte, uint64, error)
+		prepareCaller     func(*EVM) common.Address
+		executePrecompile func(*EVM, common.Address) ([]byte, uint64, error)
 		expectedErr       error
 		expectedGas       uint64
 		expectedRun       bool
@@ -1059,11 +1148,11 @@ func TestEVMPrecompileInsufficientBalance(t *testing.T) {
 	}{
 		{
 			name: "call",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				addBalance(evm, callerAddr, initialCallerBalance)
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
 				return evm.Call(caller, precompileAddr, calldata, suppliedGas, callValue)
 			},
 			expectedErr:       ErrInsufficientBalance,
@@ -1073,11 +1162,11 @@ func TestEVMPrecompileInsufficientBalance(t *testing.T) {
 		},
 		{
 			name: "callcode",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				addBalance(evm, callerAddr, initialCallerBalance)
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
 				return evm.CallCode(caller, precompileAddr, calldata, suppliedGas, callValue)
 			},
 			expectedErr:       ErrInsufficientBalance,
@@ -1087,11 +1176,11 @@ func TestEVMPrecompileInsufficientBalance(t *testing.T) {
 		},
 		{
 			name: "staticcall",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				evm.StateDB.CreateAccount(callerAddr)
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
 				return evm.StaticCall(caller, precompileAddr, calldata, suppliedGas)
 			},
 			expectedGas:       suppliedGas - gasCost,
@@ -1100,13 +1189,12 @@ func TestEVMPrecompileInsufficientBalance(t *testing.T) {
 		},
 		{
 			name: "delegatecall",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				evm.StateDB.CreateAccount(delegateCallerAddr)
-				parent := NewContract(AccountRef(callerAddr), AccountRef(delegateParentAddr), uint256.NewInt(0), suppliedGas)
-				return NewContract(parent, AccountRef(delegateCallerAddr), nil, suppliedGas)
+				return delegateCallerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
-				return evm.DelegateCall(caller, precompileAddr, calldata, suppliedGas)
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
+				return evm.DelegateCall(delegateParentAddr, caller, precompileAddr, calldata, suppliedGas, nil)
 			},
 			expectedGas:       suppliedGas - gasCost,
 			expectedRun:       true,
@@ -1118,7 +1206,7 @@ func TestEVMPrecompileInsufficientBalance(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			evm := newPrecompileTestEVM(t, originAddr)
 			precompile := &runTrackingMockPrecompile{addr: precompileAddr, gas: gasCost}
-			evm.WithPrecompiles(map[common.Address]PrecompiledContract{precompileAddr: precompile}, []common.Address{precompileAddr})
+			evm.WithCustomPrecompiles(map[common.Address]PrecompiledContract{precompileAddr: precompile})
 
 			caller := tc.prepareCaller(evm)
 			_, remainingGas, err := tc.executePrecompile(evm, caller)
@@ -1150,47 +1238,46 @@ func TestEVMPrecompileCallDepthExceeded(t *testing.T) {
 
 	testCases := []struct {
 		name              string
-		prepareCaller     func(*EVM) ContractRef
-		executePrecompile func(*EVM, ContractRef) ([]byte, uint64, error)
+		prepareCaller     func(*EVM) common.Address
+		executePrecompile func(*EVM, common.Address) ([]byte, uint64, error)
 	}{
 		{
 			name: "call",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				addBalance(evm, callerAddr, uint256.NewInt(100))
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
 				return evm.Call(caller, precompileAddr, calldata, suppliedGas, uint256.NewInt(0))
 			},
 		},
 		{
 			name: "staticcall",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				evm.StateDB.CreateAccount(callerAddr)
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
 				return evm.StaticCall(caller, precompileAddr, calldata, suppliedGas)
 			},
 		},
 		{
 			name: "delegatecall",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				evm.StateDB.CreateAccount(delegateCallerAddr)
-				parent := NewContract(AccountRef(callerAddr), AccountRef(delegateParentAddr), uint256.NewInt(0), suppliedGas)
-				return NewContract(parent, AccountRef(delegateCallerAddr), nil, suppliedGas)
+				return delegateCallerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
-				return evm.DelegateCall(caller, precompileAddr, calldata, suppliedGas)
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
+				return evm.DelegateCall(delegateParentAddr, caller, precompileAddr, calldata, suppliedGas, nil)
 			},
 		},
 		{
 			name: "callcode",
-			prepareCaller: func(evm *EVM) ContractRef {
+			prepareCaller: func(evm *EVM) common.Address {
 				addBalance(evm, callerAddr, uint256.NewInt(100))
-				return AccountRef(callerAddr)
+				return callerAddr
 			},
-			executePrecompile: func(evm *EVM, caller ContractRef) ([]byte, uint64, error) {
+			executePrecompile: func(evm *EVM, caller common.Address) ([]byte, uint64, error) {
 				return evm.CallCode(caller, precompileAddr, calldata, suppliedGas, uint256.NewInt(0))
 			},
 		},
@@ -1201,7 +1288,7 @@ func TestEVMPrecompileCallDepthExceeded(t *testing.T) {
 			evm := newPrecompileTestEVM(t, originAddr)
 			evm.depth = int(params.CallCreateDepth) + 1
 			precompile := &runTrackingMockPrecompile{addr: precompileAddr, gas: 1}
-			evm.WithPrecompiles(map[common.Address]PrecompiledContract{precompileAddr: precompile}, []common.Address{precompileAddr})
+			evm.WithCustomPrecompiles(map[common.Address]PrecompiledContract{precompileAddr: precompile})
 
 			caller := tc.prepareCaller(evm)
 			_, remainingGas, err := tc.executePrecompile(evm, caller)
@@ -1265,6 +1352,9 @@ func BenchmarkPrecompiledModExp(b *testing.B) { benchJson("modexp", "05", b) }
 func TestPrecompiledModExpEip2565(t *testing.T)      { testJson("modexp_eip2565", "f5", t) }
 func BenchmarkPrecompiledModExpEip2565(b *testing.B) { benchJson("modexp_eip2565", "f5", b) }
 
+func TestPrecompiledModExpEip7883(t *testing.T)      { testJson("modexp_eip7883", "f6", t) }
+func BenchmarkPrecompiledModExpEip7883(b *testing.B) { benchJson("modexp_eip7883", "f6", b) }
+
 // Tests the sample inputs from the elliptic curve addition EIP 213.
 func TestPrecompiledBn256Add(t *testing.T)      { testJson("bn256Add", "06", t) }
 func BenchmarkPrecompiledBn256Add(b *testing.B) { benchJson("bn256Add", "06", b) }
@@ -1278,6 +1368,30 @@ func TestPrecompiledModExpOOG(t *testing.T) {
 	for _, test := range modexpTests {
 		testPrecompiledOOG("05", test, t)
 	}
+	modexpTestsEIP2565, err := loadJson("modexp_eip2565")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range modexpTestsEIP2565 {
+		testPrecompiledOOG("f5", test, t)
+	}
+	modexpTestsEIP7883, err := loadJson("modexp_eip7883")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range modexpTestsEIP7883 {
+		testPrecompiledOOG("f6", test, t)
+	}
+	gasCostTest := precompiledTest{
+		Input:       "000000000000000000000000000000000000000000000000000000000000082800000000000000000000000000000000000000000000000040000000000000090000000000000000000000000000000000000000000000000000000000000600000000adadadad00000000ff31ff00000006ffffffffffffffffffffffffffffffffffffffff0000000000000004ffffffffffffff0000000000000000000000000000000000000000d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0000001000200fefffeff01000100000000000000ffff01000100ffffffff01000100ffffffff0000050001000100fefffdff02000300ff000000000000012b000000000000090000000000000000000000000000000000000000000000000000ffffff000000000200fffffeff00000001000000000001000200fefffeff010001000000000000000000423034000000000011006161ffbf640053004f00ff00fffffffffffffff3ff00000000000f00002dffffffffff0000000000000000000061999999999999999999999999899961ffffffff0100010000000000000000000000000600000000adadadad00000000ffff00000006fffffdffffffffffffffffffffffffffffffffff0000000000000004ffffffffffffff000000000000000000000000000000000000000098000000966375726c2f66000030000000000011006161ffbf640053004f002d00000000a200000000000000ff1818183fffffffff3a6e756c6c2c22223a6e7500006c2000000000002d2d0000000000000000000144ccef0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000080000000000000000fdff000000ff00290001000009000000000000000000000000000000000000000000000000a50004ff2800000000000000000000000000000000000000000000000001000000000000090000000000000000000000030000000000000000002b00000000000000000600000000adadadad00000000ffff00000006ffffffffffffffffffffffffffffffffffffffff0000000000000004ffffffffffffff0000000000000000000000000000000000000000d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d000000000717a1a001a1a1a1a1a1a000000121212121212121212121212121212121212121212d0d0d0d01212121212121212121212121212121212121212121212121212121212121212121212121212121212121212373800002d35373837346137346161610000000000000000d0d0d0d0d0d0d0d0002d3533321a1a000000d0d0d0d0d0d0d0d0d0d0d0d0d0d000000000717a1a001a1a1a1a1a1a000000121212121212121212121212121212121212121212d0d0d0d012121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121a1212121212121212000000000000000000000000d0d0d0d0d0d0d0d0002d3533321a1a0000000000000000000000003300000001000f5b00001100712c6eff9e61000000000061000000fbffff1a1a3a6e353900756c6c7d3b00000000009100002d35ff00600000000000000000002d3533321a1a1a1a3a6e353900756c6c7d3b000000000091373800002d3537383734613734616161d0d0d0d0d000000000717a1a001a1a1a1a1a1a000000121212121212121212121212121212121212121212d0d0d0d012121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121a1212121212121212000000000000000000000000d0d0d0d0d0d0d0d0002d3533321a1a0000000000000000000000003300000001000f5b00001100712c6eff9e61000000000061000000fbffff1a1a3a6e353900756c6c7d3b00000000009100002d35ff00600000000000000000002d3533321a1a1a1a3a6e353900756c6c7d3b000000000091373800002d353738373461373461616100000000000000000000000000000000000000000000000001000000000000090000000000000000000000030000000000000000002b00000000000000000600000000adadadad00000000ffff00000006ffffffffffffffffffffffffffffffffffffffff0000000000000004ffffffffffffff0000000000000000000000000000000000000000d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d000000000717a1a001a1a1a1a1a1a000000121212121212121212121212121212121212121212d0d0d0d01212121212121212121212121212121212121212121212121212121212121212121212121212121212121212373800002d35373837346137346161610000000000000000d0d0d0d0d0d0d0d0002d3533321a1a000000d0d0d0d0d0d0d0d0d0d0d0d0d0d000000000717a1a001a1a1a1a1a1a000000121212121212121212121212121212121212121212d0d0d0d012121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121a1212121212121212000000000000000000000000d0d0d0d0d0d0d0d0002d3533321a1a0000000000000000000000003300000001000f5b00001100712c6eff9e61000000000061000000fbffff1a1a3a6e353900756c6c7d3b00000000009100002d35ff00600000000000000000002d3533321a1a1a1a3a6e353900756c6c7d3b000000000091373800002d3537383734613734616161d0d0d0d0d000000000717a1a001a1a1a1a1a1a0000001212121212121212121212121212121212121212000000000000003300000001000f5b00001100712c6eff9e61000000000061000000fbffff1a1a3a6e353900756c6c7d3b00000000009100002d35ff00600000000000000000002d3533321a1a1a1a3a6e353900756c6c7d3b000000000091373800002d3537383734613734616161",
+		Expected:    "000000000000000000000000000000000000000000000000",
+		Name:        "oss_fuzz_gas_calc",
+		Gas:         18446744073709551615,
+		NoBenchmark: false,
+	}
+	testPrecompiledOOG("05", gasCostTest, t)
+	testPrecompiledOOG("f5", gasCostTest, t)
+	testPrecompiledOOG("f6", gasCostTest, t)
 }
 
 // Tests the sample inputs from the elliptic curve scalar multiplication EIP 213.
@@ -1331,38 +1445,36 @@ func benchJson(name, addr string, b *testing.B) {
 
 func TestPrecompiledBLS12381G1Add(t *testing.T)      { testJson("blsG1Add", "f0a", t) }
 func TestPrecompiledBLS12381G1Mul(t *testing.T)      { testJson("blsG1Mul", "f0b", t) }
-func TestPrecompiledBLS12381G1MultiExp(t *testing.T) { testJson("blsG1MultiExp", "f0c", t) }
-func TestPrecompiledBLS12381G2Add(t *testing.T)      { testJson("blsG2Add", "f0d", t) }
-func TestPrecompiledBLS12381G2Mul(t *testing.T)      { testJson("blsG2Mul", "f0e", t) }
-func TestPrecompiledBLS12381G2MultiExp(t *testing.T) { testJson("blsG2MultiExp", "f0f", t) }
-func TestPrecompiledBLS12381Pairing(t *testing.T)    { testJson("blsPairing", "f10", t) }
-func TestPrecompiledBLS12381MapG1(t *testing.T)      { testJson("blsMapG1", "f11", t) }
-func TestPrecompiledBLS12381MapG2(t *testing.T)      { testJson("blsMapG2", "f12", t) }
+func TestPrecompiledBLS12381G1MultiExp(t *testing.T) { testJson("blsG1MultiExp", "f0b", t) }
+func TestPrecompiledBLS12381G2Add(t *testing.T)      { testJson("blsG2Add", "f0c", t) }
+func TestPrecompiledBLS12381G2Mul(t *testing.T)      { testJson("blsG2Mul", "f0d", t) }
+func TestPrecompiledBLS12381G2MultiExp(t *testing.T) { testJson("blsG2MultiExp", "f0d", t) }
+func TestPrecompiledBLS12381Pairing(t *testing.T)    { testJson("blsPairing", "f0e", t) }
+func TestPrecompiledBLS12381MapG1(t *testing.T)      { testJson("blsMapG1", "f0f", t) }
+func TestPrecompiledBLS12381MapG2(t *testing.T)      { testJson("blsMapG2", "f10", t) }
 
 func TestPrecompiledPointEvaluation(t *testing.T) { testJson("pointEvaluation", "0a", t) }
 
 func BenchmarkPrecompiledPointEvaluation(b *testing.B) { benchJson("pointEvaluation", "0a", b) }
 
 func BenchmarkPrecompiledBLS12381G1Add(b *testing.B)      { benchJson("blsG1Add", "f0a", b) }
-func BenchmarkPrecompiledBLS12381G1Mul(b *testing.B)      { benchJson("blsG1Mul", "f0b", b) }
-func BenchmarkPrecompiledBLS12381G1MultiExp(b *testing.B) { benchJson("blsG1MultiExp", "f0c", b) }
-func BenchmarkPrecompiledBLS12381G2Add(b *testing.B)      { benchJson("blsG2Add", "f0d", b) }
-func BenchmarkPrecompiledBLS12381G2Mul(b *testing.B)      { benchJson("blsG2Mul", "f0e", b) }
-func BenchmarkPrecompiledBLS12381G2MultiExp(b *testing.B) { benchJson("blsG2MultiExp", "f0f", b) }
-func BenchmarkPrecompiledBLS12381Pairing(b *testing.B)    { benchJson("blsPairing", "f10", b) }
-func BenchmarkPrecompiledBLS12381MapG1(b *testing.B)      { benchJson("blsMapG1", "f11", b) }
-func BenchmarkPrecompiledBLS12381MapG2(b *testing.B)      { benchJson("blsMapG2", "f12", b) }
+func BenchmarkPrecompiledBLS12381G1MultiExp(b *testing.B) { benchJson("blsG1MultiExp", "f0b", b) }
+func BenchmarkPrecompiledBLS12381G2Add(b *testing.B)      { benchJson("blsG2Add", "f0c", b) }
+func BenchmarkPrecompiledBLS12381G2MultiExp(b *testing.B) { benchJson("blsG2MultiExp", "f0d", b) }
+func BenchmarkPrecompiledBLS12381Pairing(b *testing.B)    { benchJson("blsPairing", "f0e", b) }
+func BenchmarkPrecompiledBLS12381MapG1(b *testing.B)      { benchJson("blsMapG1", "f0f", b) }
+func BenchmarkPrecompiledBLS12381MapG2(b *testing.B)      { benchJson("blsMapG2", "f10", b) }
 
 // Failure tests
 func TestPrecompiledBLS12381G1AddFail(t *testing.T)      { testJsonFail("blsG1Add", "f0a", t) }
 func TestPrecompiledBLS12381G1MulFail(t *testing.T)      { testJsonFail("blsG1Mul", "f0b", t) }
-func TestPrecompiledBLS12381G1MultiExpFail(t *testing.T) { testJsonFail("blsG1MultiExp", "f0c", t) }
-func TestPrecompiledBLS12381G2AddFail(t *testing.T)      { testJsonFail("blsG2Add", "f0d", t) }
-func TestPrecompiledBLS12381G2MulFail(t *testing.T)      { testJsonFail("blsG2Mul", "f0e", t) }
-func TestPrecompiledBLS12381G2MultiExpFail(t *testing.T) { testJsonFail("blsG2MultiExp", "f0f", t) }
-func TestPrecompiledBLS12381PairingFail(t *testing.T)    { testJsonFail("blsPairing", "f10", t) }
-func TestPrecompiledBLS12381MapG1Fail(t *testing.T)      { testJsonFail("blsMapG1", "f11", t) }
-func TestPrecompiledBLS12381MapG2Fail(t *testing.T)      { testJsonFail("blsMapG2", "f12", t) }
+func TestPrecompiledBLS12381G1MultiExpFail(t *testing.T) { testJsonFail("blsG1MultiExp", "f0b", t) }
+func TestPrecompiledBLS12381G2AddFail(t *testing.T)      { testJsonFail("blsG2Add", "f0c", t) }
+func TestPrecompiledBLS12381G2MulFail(t *testing.T)      { testJsonFail("blsG2Mul", "f0d", t) }
+func TestPrecompiledBLS12381G2MultiExpFail(t *testing.T) { testJsonFail("blsG2MultiExp", "f0d", t) }
+func TestPrecompiledBLS12381PairingFail(t *testing.T)    { testJsonFail("blsPairing", "f0e", t) }
+func TestPrecompiledBLS12381MapG1Fail(t *testing.T)      { testJsonFail("blsMapG1", "f0f", t) }
+func TestPrecompiledBLS12381MapG2Fail(t *testing.T)      { testJsonFail("blsMapG2", "f10", t) }
 
 func loadJson(name string) ([]precompiledTest, error) {
 	data, err := os.ReadFile(fmt.Sprintf("testdata/precompiles/%v.json", name))
@@ -1399,7 +1511,7 @@ func BenchmarkPrecompiledBLS12381G1MultiExpWorstCase(b *testing.B) {
 		Name:        "WorstCaseG1",
 		NoBenchmark: false,
 	}
-	benchmarkPrecompiled("f0c", testcase, b)
+	benchmarkPrecompiled("f0b", testcase, b)
 }
 
 // BenchmarkPrecompiledBLS12381G2MultiExpWorstCase benchmarks the worst case we could find that still fits a gaslimit of 10MGas.
@@ -1420,5 +1532,17 @@ func BenchmarkPrecompiledBLS12381G2MultiExpWorstCase(b *testing.B) {
 		Name:        "WorstCaseG2",
 		NoBenchmark: false,
 	}
-	benchmarkPrecompiled("f0f", testcase, b)
+	benchmarkPrecompiled("f0d", testcase, b)
 }
+
+// Benchmarks the sample inputs from the P256VERIFY precompile.
+func BenchmarkPrecompiledP256Verify(bench *testing.B) {
+	t := precompiledTest{
+		Input:    "4cee90eb86eaa050036147a12d49004b6b9c72bd725d39d4785011fe190f0b4da73bd4903f0ce3b639bbbf6e8e80d16931ff4bcf5993d58468e8fb19086e8cac36dbcd03009df8c59286b162af3bd7fcc0450c9aa81be5d10d312af6c66b1d604aebd3099c618202fcfe16ae7770b0c49ab5eadf74b754204a3bb6060e44eff37618b065f9832de4ca6ca971a7a1adc826d0f7c00181a5fb2ddf79ae00b4e10e",
+		Expected: "0000000000000000000000000000000000000000000000000000000000000001",
+		Name:     "p256Verify",
+	}
+	benchmarkPrecompiled("0b", t, bench)
+}
+
+func TestPrecompiledP256Verify(t *testing.T) { testJson("p256Verify", "0b", t) }

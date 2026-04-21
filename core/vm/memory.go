@@ -17,8 +17,16 @@
 package vm
 
 import (
+	"sync"
+
 	"github.com/holiman/uint256"
 )
+
+var memoryPool = sync.Pool{
+	New: func() any {
+		return &Memory{}
+	},
+}
 
 // Memory implements a simple memory model for the ethereum virtual machine.
 type Memory struct {
@@ -28,7 +36,18 @@ type Memory struct {
 
 // NewMemory returns a new memory model.
 func NewMemory() *Memory {
-	return &Memory{}
+	return memoryPool.Get().(*Memory)
+}
+
+// Free returns the memory to the pool.
+func (m *Memory) Free() {
+	// To reduce peak allocation, return only smaller memory instances to the pool.
+	const maxBufferSize = 16 << 10
+	if cap(m.store) <= maxBufferSize {
+		m.store = m.store[:0]
+		m.lastGasCost = 0
+		memoryPool.Put(m)
+	}
 }
 
 // Set sets offset + size to value
@@ -54,8 +73,7 @@ func (m *Memory) Set32(offset uint64, val *uint256.Int) {
 		panic("invalid memory: store empty")
 	}
 	// Fill in relevant bits
-	b32 := val.Bytes32()
-	copy(m.store[offset:], b32[:])
+	val.PutUint256(m.store[offset:])
 }
 
 // Resize resizes the memory to size

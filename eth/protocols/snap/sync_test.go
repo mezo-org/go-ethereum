@@ -106,13 +106,13 @@ func BenchmarkHashing(b *testing.B) {
 	}
 	b.Run("old", func(b *testing.B) {
 		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			old()
 		}
 	})
 	b.Run("new", func(b *testing.B) {
 		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			new()
 		}
 	})
@@ -596,7 +596,6 @@ func testSyncBloatedProof(t *testing.T, scheme string) {
 		// The proofs
 		proof := trienode.NewProofSet()
 		if err := t.accountTrie.Prove(origin[:], proof); err != nil {
-			t.logger.Error("Could not prove origin", "origin", origin, "error", err)
 			t.logger.Error("Could not prove origin", "origin", origin, "error", err)
 		}
 		// The bloat: add proof of every single element
@@ -1515,7 +1514,7 @@ func makeAccountTrieNoStorage(n int, scheme string) (string, *trie.Trie, []*kv) 
 	// Commit the state changes into db and re-create the trie
 	// for accessing later.
 	root, nodes := accTrie.Commit(false)
-	db.Update(root, types.EmptyRootHash, 0, trienode.NewWithNodeSet(nodes), nil)
+	db.Update(root, types.EmptyRootHash, 0, trienode.NewWithNodeSet(nodes), triedb.NewStateSet())
 
 	accTrie, _ = trie.New(trie.StateTrieID(root), db)
 	return db.Scheme(), accTrie, entries
@@ -1577,7 +1576,7 @@ func makeBoundaryAccountTrie(scheme string, n int) (string, *trie.Trie, []*kv) {
 	// Commit the state changes into db and re-create the trie
 	// for accessing later.
 	root, nodes := accTrie.Commit(false)
-	db.Update(root, types.EmptyRootHash, 0, trienode.NewWithNodeSet(nodes), nil)
+	db.Update(root, types.EmptyRootHash, 0, trienode.NewWithNodeSet(nodes), triedb.NewStateSet())
 
 	accTrie, _ = trie.New(trie.StateTrieID(root), db)
 	return db.Scheme(), accTrie, entries
@@ -1626,7 +1625,7 @@ func makeAccountTrieWithStorageWithUniqueStorage(scheme string, accounts, slots 
 	nodes.Merge(set)
 
 	// Commit gathered dirty nodes into database
-	db.Update(root, types.EmptyRootHash, 0, nodes, nil)
+	db.Update(root, types.EmptyRootHash, 0, nodes, triedb.NewStateSet())
 
 	// Re-create tries with new root
 	accTrie, _ = trie.New(trie.StateTrieID(root), db)
@@ -1693,7 +1692,7 @@ func makeAccountTrieWithStorage(scheme string, accounts, slots int, code, bounda
 	nodes.Merge(set)
 
 	// Commit gathered dirty nodes into database
-	db.Update(root, types.EmptyRootHash, 0, nodes, nil)
+	db.Update(root, types.EmptyRootHash, 0, nodes, triedb.NewStateSet())
 
 	// Re-create tries with new root
 	accTrie, err := trie.New(trie.StateTrieID(root), db)
@@ -1962,5 +1961,5 @@ func newDbConfig(scheme string) *triedb.Config {
 	if scheme == rawdb.HashScheme {
 		return &triedb.Config{}
 	}
-	return &triedb.Config{PathDB: pathdb.Defaults}
+	return &triedb.Config{PathDB: &pathdb.Config{SnapshotNoBuild: true}}
 }
