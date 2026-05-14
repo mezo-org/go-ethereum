@@ -34,6 +34,10 @@ import (
 type (
 	// CanTransferFunc is the signature of a transfer guard function
 	CanTransferFunc func(StateDB, common.Address, *uint256.Int) bool
+	// CanReceiveTransferFunc is the signature of a recipient-side transfer
+	// guard function. The address argument is the recipient (credited
+	// account), not the sender.
+	CanReceiveTransferFunc func(StateDB, common.Address, *uint256.Int) bool
 	// TransferFunc is the signature of a transfer function
 	TransferFunc func(StateDB, common.Address, common.Address, *uint256.Int)
 	// GetHashFunc returns the n'th block hash in the blockchain
@@ -61,6 +65,14 @@ type BlockContext struct {
 	BaseFee     *big.Int       // Provides information for BASEFEE (0 if vm runs with NoBaseFee flag and 0 gas price)
 	BlobBaseFee *big.Int       // Provides information for BLOBBASEFEE (0 if vm runs with NoBaseFee flag and 0 blob gas price)
 	Random      *common.Hash   // Provides information for PREVRANDAO
+
+	// CanReceiveTransfer is a Mezo-specific fork addition (does not exist
+	// in upstream go-ethereum). Optional recipient-side guard invoked by
+	// Call to fail-fast on transfers the host chain refuses to credit.
+	// Nil-safe: a nil value disables the check, preserving upstream
+	// behavior. NewEVMBlockContext leaves it nil; only chain integrators
+	// (e.g. mezod) populate it.
+	CanReceiveTransfer CanReceiveTransferFunc
 }
 
 // TxContext provides the EVM with information about a transaction.
@@ -248,6 +260,19 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 	// Fail if we're trying to transfer more than the available balance
 	if !value.IsZero() && !evm.Context.CanTransfer(evm.StateDB, caller, value) {
 		return nil, gas, ErrInsufficientBalance
+	}
+	// Recipient-side guard (Mezo-specific fork addition; nil-safe). Gated
+	// in Call only: DelegateCall and StaticCall perform no value transfer,
+	// CallCode credits the caller rather than the target, and CREATE /
+	// CREATE2 credit a freshly-derived contract address that by construction
+	// cannot collide with the well-known host-chain accounts (module
+	// accounts, etc.) that this guard is intended to protect — so none of
+	// those frames need the check. Placed before the StateDB snapshot so
+	// a refusal aborts the frame cleanly with no state mutation, instead
+	// of being caught at commit time.
+	if !value.IsZero() && evm.Context.CanReceiveTransfer != nil &&
+		!evm.Context.CanReceiveTransfer(evm.StateDB, addr, value) {
+		return nil, gas, ErrTransferNotAllowed
 	}
 	snapshot := evm.StateDB.Snapshot()
 	p, isPrecompile := evm.precompile(addr)
