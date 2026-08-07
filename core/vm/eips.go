@@ -42,6 +42,8 @@ var activators = map[int]func(*JumpTable){
 	4762: enable4762,
 	7702: enable7702,
 	7939: enable7939,
+	// Custom, non-standard EIPs are numbered from 90000 up.
+	90000: enable90000,
 }
 
 // EnableEIP enables the given EIP on the config.
@@ -339,6 +341,17 @@ func enable6780(jt *JumpTable) {
 		constantGas: params.SelfdestructGasEIP150,
 		minStack:    minStack(1, 0),
 		maxStack:    maxStack(1, 0),
+	}
+}
+
+// enable90000 disables the SELFDESTRUCT opcode. When active, 0xff is treated as
+// an invalid opcode, so any frame that executes it reverts.
+func enable90000(jt *JumpTable) {
+	jt[SELFDESTRUCT] = &operation{
+		execute:   opUndefined,
+		minStack:  minStack(0, 0),
+		maxStack:  maxStack(0, 0),
+		undefined: true,
 	}
 }
 
